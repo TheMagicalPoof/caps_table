@@ -1,14 +1,8 @@
 import random
 import json
-import os
-
-
 
 TOTAL_CAPS = 4000
 
-
-
-# --- Псевдоданные ---
 colors_pool = [
     ([0, 128, 0], "heineken"), ([255, 255, 0], "corona"), ([255, 0, 0], "bud"),
     ([0, 0, 255], "bluecap"), ([255, 165, 0], "amber"), ([128, 0, 128], "purplebrew"),
@@ -22,16 +16,23 @@ colors_pool = [
     ([255, 228, 181], "moccaale"), ([205, 133, 63], "saddlebrown"), ([128, 128, 0], "olivemax")
 ]
 
-def generate_caps_json(path="caps.json", total=100):
+# Словарь для сопоставления label → уникальный id
+label_to_type_id = {label: i for i, (_, label) in enumerate(colors_pool)}
+
+def rgb_to_hex(rgb):
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+def generate_caps_json(path, total=100):
     caps = []
     for _ in range(total):
-        color, label = random.choice(colors_pool)
-        caps.append({"color": color, "label": label})
-    try:
-        with open(path, "w") as f:
-            json.dump(caps, f, indent=4)
-    except OSError as e:
-        print(f"Ошибка при открытии файла: {e}")
+        rgb, label = random.choice(colors_pool)
+        caps.append({
+            "color": rgb_to_hex(rgb),
+            "label": label,
+            "type_id": label_to_type_id[label]
+        })
+    with open(path, "w") as f:
+        json.dump(caps, f, indent=4)
 
 if __name__ == '__main__':
-    generate_caps_json(TOTAL_CAPS)
+    generate_caps_json("caps.json", TOTAL_CAPS)

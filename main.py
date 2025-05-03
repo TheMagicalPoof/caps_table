@@ -8,14 +8,15 @@ from copy import deepcopy
 from math import exp
 import colorsys
 from matplotlib.widgets import Button
+from scipy.spatial import KDTree
 
 # --- Параметры ---
 CAP_DIAMETER = 30   # мм, например
-TABLE_WIDTH = 200   # мм
-TABLE_HEIGHT = 400
+TABLE_WIDTH = 600   # мм
+TABLE_HEIGHT = 2000
 
-ITERATIONS = 10000
-VISUALIZE_EVERY = 10
+ITERATIONS = 100000000
+VISUALIZE_EVERY = 1000
 
 # Шаги смещения (в шестиугольной сетке)
 dx = CAP_DIAMETER * np.sqrt(3) / 2
@@ -42,16 +43,91 @@ def generate_hex_coords(cols, rows):
     return coords
 
 # --- Метрика качества раскладки ---
-def layout_cost(caps, coords):
+# def layout_cost(caps, coords):
+#     cost = 0
+#     for i in range(len(caps)):
+#         for j in range(i + 1, len(caps)):
+#             c1 = np.array(caps[i]['color'])
+#             c2 = np.array(caps[j]['color'])
+#             dist = np.linalg.norm(np.array(coords[i]) - np.array(coords[j]))
+#             color_diff = np.linalg.norm(c1 - c2)
+#             cost += color_diff / (dist + 1e-5)
+#     return cost
+
+# def layout_cost(caps, coords, radius=5.0, w_grad=1.0, w_local=2.0):
+#     cost = 0
+#     for i in range(len(caps)):
+#         c1 = np.array(caps[i]['color'])
+#         coord_i = np.array(coords[i])
+
+#         local_colors = []
+#         for j in range(len(caps)):
+#             if i == j:
+#                 continue
+#             coord_j = np.array(coords[j])
+#             dist = np.linalg.norm(coord_i - coord_j)
+
+#             # --- Градиент (мягкая смена цвета)
+#             c2 = np.array(caps[j]['color'])
+#             color_diff = np.linalg.norm(c1 - c2)
+#             cost += w_grad * color_diff / (dist + 1e-5)
+
+#             # --- Локальное разнообразие
+#             if dist < radius:
+#                 local_colors.append(tuple(c2))
+
+#         # # --- Штраф за "острова": часто повторяющиеся цвета рядом
+#         # if local_colors:
+#         #     color_counts = {}
+#         #     for col in local_colors:
+#         #         color_counts[col] = color_counts.get(col, 0) + 1
+#         #     most_common_count = max(color_counts.values())
+#         #     cost += w_local * most_common_count  # чем больше повторов, тем хуже
+
+#         if local_colors:
+#             color_counts = {}
+#             for col in local_colors:
+#                 color_counts[col] = color_counts.get(col, 0) + 1
+#             most_common_count = max(color_counts.values())
+#             if most_common_count > 1:
+#                 cost += w_local * (most_common_count - 1) ** 2    # квадратичный штраф
+
+#     return cost
+
+
+
+from scipy.spatial import cKDTree
+
+def layout_cost(caps, coords, radius=5.0, w_grad=1.0, w_local=2.0):
     cost = 0
-    for i in range(len(caps)):
-        for j in range(i + 1, len(caps)):
-            c1 = np.array(caps[i]['color'])
-            c2 = np.array(caps[j]['color'])
-            dist = np.linalg.norm(np.array(coords[i]) - np.array(coords[j]))
+    coords_np = np.array(coords)
+    caps_colors = np.array([cap['color'] for cap in caps])
+    tree = cKDTree(coords_np)
+
+    for i, coord in enumerate(coords_np):
+        c1 = caps_colors[i]
+        # Найдём соседей в радиусе
+        idxs = tree.query_ball_point(coord, r=radius)
+
+        for j in idxs:
+            if i == j:
+                continue
+            c2 = caps_colors[j]
+            dist = np.linalg.norm(coord - coords_np[j])
             color_diff = np.linalg.norm(c1 - c2)
-            cost += color_diff / (dist + 1e-5)
+            cost += w_grad * color_diff / (dist + 1e-5)
+
+        if len(idxs) > 1:
+            local_colors = [tuple(caps_colors[j]) for j in idxs if j != i]
+            color_counts = {}
+            for col in local_colors:
+                color_counts[col] = color_counts.get(col, 0) + 1
+            most_common = max(color_counts.values())
+            if most_common > 1:
+                cost += w_local * (most_common - 1) ** 2
+
     return cost
+
 
 # --- Отрисовка ---
 def update_plot(ax, caps, coords, cost=None, step=None):
@@ -59,7 +135,7 @@ def update_plot(ax, caps, coords, cost=None, step=None):
     ax.set_aspect('equal')
     ax.axis('off')
     if step is not None and cost is not None:
-        ax.set_title(f"Step {step}, Cost: {cost:.0f}")
+        ax.set_title(f"Step {step}, Cost: {cost:.0f}, Total Caps: {cols * rows}")
     for (x, y), cap in zip(coords, caps):
         color = np.array(cap['color']) / 255
         circle = plt.Circle((x, y), radius * 0.9, color=color, ec='black', lw=0.2)
