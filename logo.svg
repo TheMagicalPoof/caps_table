@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Caps Table logo">
+  <rect width="64" height="64" rx="14" fill="#17202a"/>
+  <g filter="url(#shadow)">
+    <g transform="translate(32 19)">
+      <circle r="12" fill="#f4d35e"/>
+      <circle r="9.4" fill="#f9e27d"/>
+      <path d="M0-12 2.3-9.2 5.9-10.4 6.4-6.8 10-5.9 8.3-2.7 12 0 8.3 2.7 10 5.9 6.4 6.8 5.9 10.4 2.3 9.2 0 12-2.3 9.2-5.9 10.4-6.4 6.8-10 5.9-8.3 2.7-12 0-8.3-2.7-10-5.9-6.4-6.8-5.9-10.4-2.3-9.2Z" fill="none" stroke="#b88919" stroke-width="1.5" stroke-linejoin="round"/>
+      <circle r="4.9" fill="#fff4b8" opacity=".45"/>
+    </g>
+    <g transform="translate(20 42)">
+      <circle r="12" fill="#d43d2f"/>
+      <circle r="9.4" fill="#e45a4e"/>
+      <path d="M0-12 2.3-9.2 5.9-10.4 6.4-6.8 10-5.9 8.3-2.7 12 0 8.3 2.7 10 5.9 6.4 6.8 5.9 10.4 2.3 9.2 0 12-2.3 9.2-5.9 10.4-6.4 6.8-10 5.9-8.3 2.7-12 0-8.3-2.7-10-5.9-6.4-6.8-5.9-10.4-2.3-9.2Z" fill="none" stroke="#8f241d" stroke-width="1.5" stroke-linejoin="round"/>
+      <circle r="4.9" fill="#ffb6ad" opacity=".35"/>
+    </g>
+    <g transform="translate(44 42)">
+      <circle r="12" fill="#2f80ed"/>
+      <circle r="9.4" fill="#55a3ff"/>
+      <path d="M0-12 2.3-9.2 5.9-10.4 6.4-6.8 10-5.9 8.3-2.7 12 0 8.3 2.7 10 5.9 6.4 6.8 5.9 10.4 2.3 9.2 0 12-2.3 9.2-5.9 10.4-6.4 6.8-10 5.9-8.3 2.7-12 0-8.3-2.7-10-5.9-6.4-6.8-5.9-10.4-2.3-9.2Z" fill="none" stroke="#1555a7" stroke-width="1.5" stroke-linejoin="round"/>
+      <circle r="4.9" fill="#b9dcff" opacity=".38"/>
+    </g>
+  </g>
+  <defs>
+    <filter id="shadow" x="4" y="4" width="56" height="56" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="2" stdDeviation="1.8" flood-color="#000" flood-opacity=".32"/>
+    </filter>
+  </defs>
+</svg>
