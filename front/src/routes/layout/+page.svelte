@@ -136,6 +136,18 @@
   let hoverPosition = { x: 0, y: 0 };
   const exportScale = 4;
   const layoutSettingsKey = 'caps-table-layout-settings';
+  const imageLodLevels = [24, 36, 48, 64, 96, 128, 192, 256, 384, 512] as const;
+  const tableRasterScales = [0.16, 0.25, 0.33, 0.5, 0.75, 1] as const;
+  const directRenderVisibleCapLimit = 420;
+  const hoverVisibleCapLimit = 900;
+  const capImageLodCache = new Map<string, Map<number, HTMLCanvasElement>>();
+  const tableBitmapCache = new Map<string, HTMLCanvasElement>();
+  let tableRenderVersion = 0;
+
+  function invalidateTableBitmapCache() {
+    tableBitmapCache.clear();
+    tableRenderVersion += 1;
+  }
 
   function getStoredNumber(value: unknown, fallback: number, min: number, max: number) {
     const parsed = Number(value);
@@ -242,6 +254,7 @@
     capImageCache.set(src, null);
     image.onload = () => {
       capImageCache.set(src, image);
+      invalidateTableBitmapCache();
       draw();
     };
     image.onerror = () => {
@@ -252,32 +265,63 @@
     return null;
   }
 
+  function getLodImage(src: string, image: HTMLImageElement, renderDiameter: number, preferOriginal = false) {
+    if (preferOriginal) return image;
+
+    const pixelRatio = typeof devicePixelRatio === 'number' ? Math.max(1, Math.min(devicePixelRatio, 2)) : 1;
+    const targetSize = Math.ceil(renderDiameter * pixelRatio);
+    const naturalSize = Math.max(1, Math.min(image.naturalWidth || image.width, image.naturalHeight || image.height));
+    const lodSize = imageLodLevels.find((size) => size >= targetSize);
+
+    if (!lodSize || lodSize >= naturalSize) return image;
+
+    const cachedBySize = capImageLodCache.get(src) ?? new Map<number, HTMLCanvasElement>();
+    const cached = cachedBySize.get(lodSize);
+    if (cached) return cached;
+
+    const lodCanvas = document.createElement('canvas');
+    lodCanvas.width = lodSize;
+    lodCanvas.height = lodSize;
+    const lodCtx = lodCanvas.getContext('2d');
+    if (!lodCtx) return image;
+
+    lodCtx.imageSmoothingEnabled = true;
+    lodCtx.imageSmoothingQuality = 'high';
+    lodCtx.drawImage(image, 0, 0, lodSize, lodSize);
+    cachedBySize.set(lodSize, lodCanvas);
+    capImageLodCache.set(src, cachedBySize);
+
+    return lodCanvas;
+  }
+
   function drawCapPhoto(cap: Cap, centerX: number, centerY: number, radius: number) {
     if (!cap.image || !ctx) return false;
 
     const image = getCapImage(cap.image);
     if (!image) return false;
+    const source = getLodImage(cap.image, image, radius * 2);
 
     ctx.save();
     ctx.beginPath();
     ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
     ctx.clip();
-    ctx.drawImage(image, centerX - radius, centerY - radius, radius * 2, radius * 2);
+    ctx.drawImage(source, centerX - radius, centerY - radius, radius * 2, radius * 2);
     ctx.restore();
     return true;
   }
 
-  function drawCapPhotoTo(targetCtx: CanvasRenderingContext2D, cap: Cap, centerX: number, centerY: number, radius: number) {
+  function drawCapPhotoTo(targetCtx: CanvasRenderingContext2D, cap: Cap, centerX: number, centerY: number, radius: number, pixelScale = 1) {
     if (!cap.image) return false;
 
     const image = getCapImage(cap.image);
     if (!image) return false;
+    const source = getLodImage(cap.image, image, radius * 2 * pixelScale, pixelScale >= exportScale);
 
     targetCtx.save();
     targetCtx.beginPath();
     targetCtx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
     targetCtx.clip();
-    targetCtx.drawImage(image, centerX - radius, centerY - radius, radius * 2, radius * 2);
+    targetCtx.drawImage(source, centerX - radius, centerY - radius, radius * 2, radius * 2);
     targetCtx.restore();
     return true;
   }
@@ -319,7 +363,7 @@
       const centerX = cap.x + capsDiameter / 2;
       const centerY = cap.y + capsDiameter / 2;
       const radius = (cap.diameter ?? capsDiameter) / 2;
-      const photoDrawn = (forcePhotos || capRenderMode === 'photo') && drawCapPhotoTo(targetCtx, cap, centerX, centerY, radius);
+      const photoDrawn = (forcePhotos || capRenderMode === 'photo') && drawCapPhotoTo(targetCtx, cap, centerX, centerY, radius, pixelScale);
 
       targetCtx.beginPath();
       targetCtx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
@@ -346,54 +390,52 @@
     targetCtx.restore();
   }
 
-  function exportHighResolutionPng() {
-    if (!caps.size) return;
-
-    const offscreen = document.createElement('canvas');
-    offscreen.width = Math.max(1, Math.round(tableWidth * exportScale));
-    offscreen.height = Math.max(1, Math.round(tableHeight * exportScale));
-    const exportCtx = offscreen.getContext('2d');
-    if (!exportCtx) return;
-
-    drawTableTo(exportCtx, exportScale, true, true);
-
-    const link = document.createElement('a');
-    link.href = offscreen.toDataURL('image/png');
-    link.download = `caps-table-${Math.round(tableWidth)}x${Math.round(tableHeight)}@${exportScale}x.png`;
-    link.click();
+  function getTableRasterScale() {
+    const pixelRatio = typeof devicePixelRatio === 'number' ? Math.max(1, Math.min(devicePixelRatio, 2)) : 1;
+    const targetScale = Math.max(0.16, Math.min(1, scale * pixelRatio));
+    return tableRasterScales.find((rasterScale) => rasterScale >= targetScale) ?? 1;
   }
 
-  function setCapRenderMode(nextMode: 'color' | 'photo') {
-    capRenderMode = nextMode;
-    persistLayoutSettings();
-    draw();
+  function getTableBitmap() {
+    if (!caps.size) return null;
+
+    const rasterScale = getTableRasterScale();
+    const cacheKey = `${tableRenderVersion}:${capRenderMode}:${rasterScale}`;
+    const cached = tableBitmapCache.get(cacheKey);
+    if (cached) return cached;
+
+    const bitmap = document.createElement('canvas');
+    bitmap.width = Math.max(1, Math.round(tableWidth * rasterScale));
+    bitmap.height = Math.max(1, Math.round(tableHeight * rasterScale));
+    const bitmapCtx = bitmap.getContext('2d');
+    if (!bitmapCtx) return null;
+
+    drawTableTo(bitmapCtx, rasterScale, false, capRenderMode === 'photo');
+    tableBitmapCache.set(cacheKey, bitmap);
+
+    return bitmap;
   }
 
-  function updateGradientOpacity() {
-    persistLayoutSettings();
-    draw();
+  function getVisibleCapEstimate() {
+    if (!canvas || !caps.size) return 0;
+
+    const visibleLeft = ((capsDiameter / 2) * scale - offsetX) / Math.max(scale, 0.0001);
+    const visibleTop = ((capsDiameter / 2) * scale - offsetY) / Math.max(scale, 0.0001);
+    const visibleRight = (canvas.width + (capsDiameter / 2) * scale - offsetX) / Math.max(scale, 0.0001);
+    const visibleBottom = (canvas.height + (capsDiameter / 2) * scale - offsetY) / Math.max(scale, 0.0001);
+    const visibleWidth = Math.max(0, Math.min(tableWidth, visibleRight) - Math.max(0, visibleLeft));
+    const visibleHeight = Math.max(0, Math.min(tableHeight, visibleBottom) - Math.max(0, visibleTop));
+    const tableArea = Math.max(1, tableWidth * tableHeight);
+
+    return Math.ceil(caps.size * ((visibleWidth * visibleHeight) / tableArea));
   }
 
-  function draw() {
-    if (!ctx || !canvas) return;
+  function shouldDrawCapsDirect() {
+    return getVisibleCapEstimate() <= directRenderVisibleCapLimit;
+  }
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    ctx.save();
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.rotate((rotation * Math.PI) / 180);
-    ctx.translate(-canvas.width / 2, -canvas.height / 2);
-
-    ctx.beginPath();
-    ctx.rect(
-      offsetX - (capsDiameter / 2) * scale,
-      offsetY - (capsDiameter / 2) * scale,
-      tableWidth * scale,
-      tableHeight * scale,
-    );
-    ctx.strokeStyle = '#94a3b8';
-    ctx.lineWidth = 2;
-    ctx.stroke();
+  function drawCapsDirect() {
+    if (!ctx) return;
 
     for (const cap of caps.values()) {
       const centerX = cap.x * scale + offsetX;
@@ -423,28 +465,103 @@
       );
       ctx.globalAlpha = 1;
     }
+  }
+
+  function exportHighResolutionPng() {
+    if (!caps.size) return;
+
+    const offscreen = document.createElement('canvas');
+    offscreen.width = Math.max(1, Math.round(tableWidth * exportScale));
+    offscreen.height = Math.max(1, Math.round(tableHeight * exportScale));
+    const exportCtx = offscreen.getContext('2d');
+    if (!exportCtx) return;
+
+    drawTableTo(exportCtx, exportScale, true, true);
+
+    const link = document.createElement('a');
+    link.href = offscreen.toDataURL('image/png');
+    link.download = `caps-table-${Math.round(tableWidth)}x${Math.round(tableHeight)}@${exportScale}x.png`;
+    link.click();
+  }
+
+  function setCapRenderMode(nextMode: 'color' | 'photo') {
+    capRenderMode = nextMode;
+    persistLayoutSettings();
+    invalidateTableBitmapCache();
+    draw();
+  }
+
+  function updateGradientOpacity() {
+    persistLayoutSettings();
+    invalidateTableBitmapCache();
+    draw();
+  }
+
+  function draw() {
+    if (!ctx || !canvas) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    ctx.save();
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate((rotation * Math.PI) / 180);
+    ctx.translate(-canvas.width / 2, -canvas.height / 2);
+
+    ctx.beginPath();
+    ctx.rect(
+      offsetX - (capsDiameter / 2) * scale,
+      offsetY - (capsDiameter / 2) * scale,
+      tableWidth * scale,
+      tableHeight * scale,
+    );
+    ctx.strokeStyle = '#94a3b8';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    const tableBitmap = shouldDrawCapsDirect() ? null : getTableBitmap();
+    if (tableBitmap) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = scale < 0.8 ? 'low' : 'medium';
+      ctx.drawImage(
+        tableBitmap,
+        offsetX - (capsDiameter / 2) * scale,
+        offsetY - (capsDiameter / 2) * scale,
+        tableWidth * scale,
+        tableHeight * scale,
+      );
+    } else {
+      drawCapsDirect();
+    }
 
     ctx.restore();
   }
 
-  function updateTableSize() {
+  function updateTableSize(options: Event | { fitView?: boolean } = {}) {
+    const fitView = !(options instanceof Event) && Boolean(options.fitView);
     persistLayoutSettings();
     refreshGradient();
     generateTable();
-    hasUserMovedView = false;
-    fitTableToView(true);
+    invalidateTableBitmapCache();
+    if (fitView) {
+      hasUserMovedView = false;
+      fitTableToView(true);
+    }
     draw();
   }
 
   function rotateCanvas() {
     rotation = (rotation + 90) % 360;
     persistLayoutSettings();
-    fitTableToView(true);
     draw();
   }
 
   function updateHoveredCap(event: MouseEvent) {
     if (!canvas || dragging) {
+      hoveredCap = null;
+      return;
+    }
+
+    if (getVisibleCapEstimate() > hoverVisibleCapLimit) {
       hoveredCap = null;
       return;
     }
@@ -741,12 +858,14 @@
     const errors = new Map<string, [number, number, number]>();
     const placedColors = new Map<string, string>();
     const assignments: Cap[] = [];
-    const rows = [...new Set(usableCells.map((cell) => cell.row))].sort((a, b) => a - b);
+    const cellsByRow = new Map<number, HexCell[]>();
+    for (const cell of usableCells) {
+      cellsByRow.set(cell.row, [...(cellsByRow.get(cell.row) ?? []), cell]);
+    }
+    const rows = [...cellsByRow.keys()].sort((a, b) => a - b);
 
     for (const row of rows) {
-      const rowCells = usableCells
-        .filter((cell) => cell.row === row)
-        .sort((a, b) => (row % 2 ? b.col - a.col : a.col - b.col));
+      const rowCells = [...(cellsByRow.get(row) ?? [])].sort((a, b) => (row % 2 ? b.col - a.col : a.col - b.col));
 
       for (const cell of rowCells) {
         const key = `${cell.row},${cell.col}`;
@@ -998,13 +1117,13 @@
       datasetMeta = null;
       datasetFileName = tl(locale, 'datasetNotLoaded');
       datasetFileError = '';
-      updateTableSize();
+      updateTableSize({ fitView: true });
     } catch (error) {
       capsFileError = error instanceof Error ? error.message : tl(locale, 'readCapsFailed');
       loadedCapsData = null;
       loadedCapTypes = [];
       capsFileName = tl(locale, 'noInventory');
-      updateTableSize();
+      updateTableSize({ fitView: true });
     } finally {
       input.value = '';
     }
@@ -1052,7 +1171,7 @@
       };
       datasetFileName = tl(locale, 'draftDataset');
       datasetFileError = '';
-      updateTableSize();
+      updateTableSize({ fitView: true });
       return;
     }
 
@@ -1060,6 +1179,7 @@
     loadedCapTypes = [];
     caps.clear();
     tableMeta = null;
+    invalidateTableBitmapCache();
     capsFileName = tl(locale, 'noInventory');
     capsFileError = '';
     datasetMeta = null;
@@ -1120,6 +1240,7 @@
 
   function applyGradientChanges() {
     refreshGradient();
+    invalidateTableBitmapCache();
     updateTableSize();
   }
 
@@ -1228,6 +1349,10 @@
     };
   });
 </script>
+
+<svelte:head>
+  <title>{t(locale, 'layoutTitle')}</title>
+</svelte:head>
 
 <main class="app">
   <header class="topbar">
