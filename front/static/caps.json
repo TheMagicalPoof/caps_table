@@ -1,0 +1,215 @@
+{
+  "version": 2,
+  "cap_types": [
+    {
+      "type_id": 0,
+      "label": "heineken",
+      "color": "#008000",
+      "diameter": 30,
+      "count": 131
+    },
+    {
+      "type_id": 1,
+      "label": "corona",
+      "color": "#ffff00",
+      "diameter": 30,
+      "count": 143
+    },
+    {
+      "type_id": 2,
+      "label": "bud",
+      "color": "#ff0000",
+      "diameter": 30,
+      "count": 139
+    },
+    {
+      "type_id": 3,
+      "label": "bluecap",
+      "color": "#0000ff",
+      "diameter": 30,
+      "count": 141
+    },
+    {
+      "type_id": 4,
+      "label": "amber",
+      "color": "#ffa500",
+      "diameter": 30,
+      "count": 130
+    },
+    {
+      "type_id": 5,
+      "label": "purplebrew",
+      "color": "#800080",
+      "diameter": 30,
+      "count": 136
+    },
+    {
+      "type_id": 6,
+      "label": "whitecap",
+      "color": "#ffffff",
+      "diameter": 30,
+      "count": 141
+    },
+    {
+      "type_id": 7,
+      "label": "darkbrew",
+      "color": "#000000",
+      "diameter": 30,
+      "count": 120
+    },
+    {
+      "type_id": 8,
+      "label": "blondeale",
+      "color": "#ffdfba",
+      "diameter": 30,
+      "count": 159
+    },
+    {
+      "type_id": 9,
+      "label": "greenhouse",
+      "color": "#228b22",
+      "diameter": 30,
+      "count": 127
+    },
+    {
+      "type_id": 10,
+      "label": "brownbrew",
+      "color": "#8b4513",
+      "diameter": 30,
+      "count": 140
+    },
+    {
+      "type_id": 11,
+      "label": "redbeard",
+      "color": "#ff6347",
+      "diameter": 30,
+      "count": 138
+    },
+    {
+      "type_id": 12,
+      "label": "skyblue",
+      "color": "#00bfff",
+      "diameter": 30,
+      "count": 135
+    },
+    {
+      "type_id": 13,
+      "label": "strawberryale",
+      "color": "#ffb6c1",
+      "diameter": 30,
+      "count": 138
+    },
+    {
+      "type_id": 14,
+      "label": "peachbrew",
+      "color": "#ffdab9",
+      "diameter": 30,
+      "count": 117
+    },
+    {
+      "type_id": 15,
+      "label": "lavenderbeer",
+      "color": "#ba55d3",
+      "diameter": 30,
+      "count": 127
+    },
+    {
+      "type_id": 16,
+      "label": "fuchsia",
+      "color": "#ff69b4",
+      "diameter": 30,
+      "count": 106
+    },
+    {
+      "type_id": 17,
+      "label": "tealbrew",
+      "color": "#008080",
+      "diameter": 30,
+      "count": 150
+    },
+    {
+      "type_id": 18,
+      "label": "magentaale",
+      "color": "#ff00ff",
+      "diameter": 30,
+      "count": 103
+    },
+    {
+      "type_id": 19,
+      "label": "indigobrew",
+      "color": "#4b0082",
+      "diameter": 30,
+      "count": 137
+    },
+    {
+      "type_id": 20,
+      "label": "violetbrew",
+      "color": "#ee82ee",
+      "diameter": 30,
+      "count": 136
+    },
+    {
+      "type_id": 21,
+      "label": "ivorybeer",
+      "color": "#f8f8ff",
+      "diameter": 30,
+      "count": 125
+    },
+    {
+      "type_id": 22,
+      "label": "oliveale",
+      "color": "#bdb76b",
+      "diameter": 30,
+      "count": 139
+    },
+    {
+      "type_id": 23,
+      "label": "seashellbeer",
+      "color": "#fffaf0",
+      "diameter": 30,
+      "count": 130
+    },
+    {
+      "type_id": 24,
+      "label": "chartreuse",
+      "color": "#7fff00",
+      "diameter": 30,
+      "count": 133
+    },
+    {
+      "type_id": 25,
+      "label": "orangemania",
+      "color": "#ff8c00",
+      "diameter": 30,
+      "count": 134
+    },
+    {
+      "type_id": 26,
+      "label": "springgreen",
+      "color": "#00ff7f",
+      "diameter": 30,
+      "count": 128
+    },
+    {
+      "type_id": 27,
+      "label": "moccaale",
+      "color": "#ffe4b5",
+      "diameter": 30,
+      "count": 141
+    },
+    {
+      "type_id": 28,
+      "label": "saddlebrown",
+      "color": "#cd853f",
+      "diameter": 30,
+      "count": 143
+    },
+    {
+      "type_id": 29,
+      "label": "olivemax",
+      "color": "#808000",
+      "diameter": 30,
+      "count": 133
+    }
+  ]
+}

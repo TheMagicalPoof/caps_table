@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "samples": [
+    {
+      "type_id": 10,
+      "images": [
+        "dataset/brownbrew/front.jpg",
+        "dataset/brownbrew/side_light.jpg"
+      ]
+    }
+  ],
+  "images": [
+    {
+      "src": "dataset/batch_001.jpg",
+      "annotations": [
+        {
+          "type_id": 10,
+          "bbox": [
+            120,
+            80,
+            42,
+            42
+          ]
+        }
+      ]
+    }
+  ]
+}

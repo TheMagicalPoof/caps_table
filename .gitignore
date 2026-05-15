@@ -1,0 +1,11 @@
+﻿/.venv
+__pycache__/
+*.py[cod]
+*.log
+
+/caps.json
+/front/.svelte-kit/
+/front/build/
+/front/node_modules/
+/front/test-results/
+/front/playwright-report/
