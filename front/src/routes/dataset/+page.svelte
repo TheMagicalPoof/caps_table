@@ -22,6 +22,17 @@
     type SampleFingerprint,
   } from '$lib/datasetVision';
   import { detectBrowserLocale, formatCandidateCount as formatLocalizedCandidateCount, t, type Locale } from '$lib/i18n';
+  import { clearCapDetectorModel, getCapDetectorModelMeta, saveCapDetectorModel, type CapDetectorModelMeta } from '$lib/neuralCapDetector';
+  import {
+    deleteTrainingAnnotation,
+    downloadTrainingModel,
+    getTrainingAnnotations,
+    getTrainingBackendStats,
+    getTrainingCropUrl,
+    recordTrainingAnnotation,
+    type TrainingAnnotationRecord,
+    type TrainingBackendStats,
+  } from '$lib/trainingBackend';
   import { onMount, tick } from 'svelte';
 
   type DatasetSample = DatasetDraftSample &
@@ -43,6 +54,8 @@
     similarPendingCount: number;
     selectedTypeId: number | null;
     note: string;
+    trainingGoodBoxKey?: string;
+    cropReview?: 'good' | 'bad';
   };
 
   type DraftTypeGroup = {
@@ -58,9 +71,19 @@
   const foregroundThreshold = 42;
   let status = '';
   let error = '';
+  let detectorModelMeta: CapDetectorModelMeta | null = null;
+  let detectorModelSyncing = false;
+  let trainingBackendOnline = false;
+  let trainingBackendStats: TrainingBackendStats | null = null;
+  let trainingAnnotations: TrainingAnnotationRecord[] = [];
+  let trainingAnnotationsFilter: 'good' | 'bad' = 'good';
+  let trainingAnnotationsBusy = false;
+  let trainingBackendLastSync = '';
+  let trainingBackendLastSyncOk: boolean | null = null;
   let locale: Locale = 'ru';
   let isDraggingPhoto = false;
   let showDetectionDebug = true;
+  let manualAddMode = false;
   let minimapZoom = 1;
   let minimapPanX = 0;
   let minimapPanY = 0;
@@ -113,6 +136,105 @@
 
   function persistDraft() {
     writeDatasetDraft(samples);
+  }
+
+  async function refreshTrainingBackendStatus() {
+    const stats = await getTrainingBackendStats();
+    trainingBackendOnline = Boolean(stats);
+    trainingBackendStats = stats;
+  }
+
+  async function syncDetectorModelFromBackend(silent = false) {
+    if (detectorModelSyncing) return;
+
+    detectorModelSyncing = true;
+    try {
+      const file = await downloadTrainingModel();
+      if (!file) {
+        if (!silent) {
+          error = 'Backend ONNX-модель недоступна';
+          status = '';
+        }
+        return;
+      }
+
+      detectorModelMeta = await saveCapDetectorModel(file);
+      if (!silent) {
+        status = `ONNX-модель загружена из backend: ${file.name}`;
+        error = '';
+      }
+    } catch (modelError) {
+      if (!silent) {
+        error = modelError instanceof Error ? modelError.message : 'Не удалось загрузить ONNX из backend';
+        status = '';
+      }
+    } finally {
+      detectorModelSyncing = false;
+    }
+  }
+
+  async function refreshTrainingAnnotations() {
+    if (trainingAnnotationsBusy) return;
+
+    trainingAnnotationsBusy = true;
+    const accepted = trainingAnnotationsFilter === 'good';
+    const result = await getTrainingAnnotations(accepted, 120);
+    trainingAnnotationsBusy = false;
+
+    if (!result) {
+      trainingAnnotations = [];
+      return;
+    }
+
+    trainingAnnotations = result.items;
+    trainingBackendStats = result.counts;
+    trainingBackendOnline = true;
+  }
+
+  async function setTrainingAnnotationsFilter(nextFilter: 'good' | 'bad') {
+    trainingAnnotationsFilter = nextFilter;
+    await refreshTrainingAnnotations();
+  }
+
+  async function removeTrainingAnnotation(id: string) {
+    const result = await deleteTrainingAnnotation(id);
+    if (!result?.ok) {
+      trainingBackendLastSyncOk = false;
+      trainingBackendLastSync = 'не удалилось';
+      return;
+    }
+
+    trainingAnnotations = trainingAnnotations.filter((item) => item.id !== id);
+    trainingBackendStats = result.counts;
+    trainingBackendLastSyncOk = true;
+    trainingBackendLastSync = 'разметка удалена';
+  }
+
+  async function sendTrainingAnnotation(
+    photo: ProcessedCapPhoto,
+    accepted: boolean,
+    typeId: number | null,
+    note?: string,
+    review?: 'accepted' | 'rejected' | 'crop-good' | 'crop-bad',
+  ) {
+    const ok = await recordTrainingAnnotation({ photo, accepted, typeId, note, review });
+    trainingBackendLastSyncOk = ok;
+    trainingBackendLastSync = ok
+      ? review === 'crop-good'
+        ? 'кроп ок'
+        : review === 'crop-bad'
+          ? 'кроп плохой'
+          : accepted
+            ? 'пример принят'
+            : 'skip принят'
+      : 'backend недоступен';
+    await refreshTrainingBackendStatus();
+    await refreshTrainingAnnotations();
+  }
+
+  function getPhotoBoxKey(photo: ProcessedCapPhoto) {
+    const box = photo.foregroundBox;
+    return [photo.source.name, box.x, box.y, box.width, box.height].map((value) => String(value)).join(':');
   }
 
   function restoreDraft() {
@@ -272,8 +394,23 @@
 
     if (existingTypeId !== null && samples.some((sample) => sample.type_id === existingTypeId)) {
       const nextQuantity = getTypeQuantity(existingTypeId) + 1;
-      samples = samples.map((sample) => (sample.type_id === existingTypeId ? { ...sample, quantity: nextQuantity } : sample));
+      samples = samples.map((sample) => {
+        if (sample.type_id !== existingTypeId) return sample;
+
+        const trainingEmbeddings = pending.photo.neuralEmbedding?.length
+          ? [...(sample.trainingEmbeddings ?? []), pending.photo.neuralEmbedding]
+          : sample.trainingEmbeddings;
+
+        return {
+          ...sample,
+          quantity: nextQuantity,
+          trainingEmbeddings,
+        };
+      });
       samples = normalizeDatasetDraftSamples(samples) as DatasetSample[];
+      if (pending.trainingGoodBoxKey !== getPhotoBoxKey(pending.photo)) {
+        void sendTrainingAnnotation(pending.photo, true, existingTypeId, pending.note, 'accepted');
+      }
       pendingPhotos = pendingPhotos.filter((item) => item.id !== pendingId);
       persistDraft();
       status = t(locale, 'typeQuantityIncreased', { id: existingTypeId });
@@ -291,6 +428,8 @@
       cropDataUrl: pending.photo.cropDataUrl,
       sampleCircle: pending.photo.sampleCircle,
       histogram: pending.photo.histogram,
+      neuralEmbedding: pending.photo.neuralEmbedding,
+      trainingEmbeddings: pending.photo.neuralEmbedding?.length ? [pending.photo.neuralEmbedding] : undefined,
       sourceName: pending.photo.source.name,
       note: pending.note,
       quantity: nextQuantity,
@@ -298,6 +437,9 @@
     };
 
     samples = normalizeDatasetDraftSamples([sample, ...samples]) as DatasetSample[];
+    if (pending.trainingGoodBoxKey !== getPhotoBoxKey(pending.photo)) {
+      void sendTrainingAnnotation(pending.photo, true, typeId, pending.note, 'accepted');
+    }
     pendingPhotos = pendingPhotos.filter((item) => item.id !== pendingId);
     persistDraft();
     status = t(locale, 'sampleAdded');
@@ -305,12 +447,40 @@
   }
 
   function skipPendingSample(pendingId: string) {
+    const pending = pendingPhotos.find((item) => item.id === pendingId);
+    if (pending) {
+      void sendTrainingAnnotation(pending.photo, false, pending.selectedTypeId, pending.note, 'rejected');
+    }
     pendingPhotos = pendingPhotos.filter((item) => item.id !== pendingId);
     void focusActivePendingMinimap();
   }
 
   function updatePendingType(pendingId: string, typeId: number | null) {
     pendingPhotos = pendingPhotos.map((item) => (item.id === pendingId ? { ...item, selectedTypeId: typeId } : item));
+  }
+
+  function markCropQuality(pendingId: string, quality: 'good' | 'bad') {
+    const pending = pendingPhotos.find((item) => item.id === pendingId);
+    if (!pending) return;
+
+    const accepted = quality === 'good';
+    const boxKey = getPhotoBoxKey(pending.photo);
+    void sendTrainingAnnotation(
+      pending.photo,
+      accepted,
+      pending.selectedTypeId,
+      pending.note,
+      accepted ? 'crop-good' : 'crop-bad',
+    );
+    pendingPhotos = pendingPhotos.map((item) =>
+      item.id === pendingId
+        ? {
+            ...item,
+            cropReview: quality,
+            trainingGoodBoxKey: accepted ? boxKey : item.trainingGoodBoxKey,
+          }
+        : item,
+    );
   }
 
   function makeCenteredCropBox(centerX: number, centerY: number, sizeInput: number, sourceWidth: number, sourceHeight: number): CropBox {
@@ -439,6 +609,8 @@
   }
 
   function getDetectionBoxLabel(stage: DetectionBox['stage']) {
+    if (stage === 'manual') return 'ручная область';
+    if (stage === 'neural') return 'нейросеть';
     if (stage === 'accepted') return t(locale, 'detectionAccepted');
     if (stage === 'circle') return t(locale, 'detectionCircle');
     if (stage === 'foreground') return t(locale, 'detectionForeground');
@@ -554,8 +726,57 @@
     await applyPendingCrop(pendingId, pending.photo.foregroundBox);
   }
 
+  async function addManualPendingFromMinimap(event: PointerEvent) {
+    const pending = getActivePending();
+    const minimap = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    const layer = minimap?.querySelector('.minimap-layer');
+    if (!pending || !minimap || !(layer instanceof HTMLElement)) return false;
+
+    const imageRect = layer.getBoundingClientRect();
+    const imageScale = imageRect.width / pending.photo.source.processedWidth;
+    if (!imageScale) return false;
+
+    const sourceX = (event.clientX - imageRect.left) / imageScale;
+    const sourceY = (event.clientY - imageRect.top) / imageScale;
+    const sourceWidth = pending.photo.source.processedWidth;
+    const sourceHeight = pending.photo.source.processedHeight;
+    const size = clamp(
+      pending.photo.foregroundBox.width,
+      24,
+      Math.min(sourceWidth, sourceHeight),
+    );
+    const nextBox = makeCenteredCropBox(sourceX, sourceY, size, sourceWidth, sourceHeight);
+
+    try {
+      const photo = await reprocessCapCrop(pending.photo, nextBox);
+      photo.source.detectionBoxes = [
+        ...(photo.source.detectionBoxes ?? []),
+        {
+          ...nextBox,
+          stage: 'manual',
+        },
+      ];
+      const manualPending = makePendingPhoto(photo, []);
+      pendingPhotos = [manualPending, ...pendingPhotos];
+      manualAddMode = false;
+      status = 'Manual candidate added';
+      error = '';
+      await focusActivePendingMinimap();
+      return true;
+    } catch (manualError) {
+      error = manualError instanceof Error ? manualError.message : t(locale, 'updateCropFailed');
+      return false;
+    }
+  }
+
   function startMinimapDrag(event: PointerEvent) {
     if ((event.target as HTMLElement).closest('.crop-control')) return;
+
+    if (manualAddMode) {
+      event.preventDefault();
+      void addManualPendingFromMinimap(event);
+      return;
+    }
 
     event.preventDefault();
     (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
@@ -731,6 +952,8 @@
         fingerprint: {
           average_rgb: sample.averageRgb.map((value) => Math.round(value)) as Rgb,
           histogram_rgb_4x4x4: sample.histogram,
+          neural_embedding: sample.neuralEmbedding,
+          training_embeddings: sample.trainingEmbeddings,
         },
         note: sample.note,
         created_at: sample.createdAt,
@@ -764,6 +987,15 @@
           const histogram = Array.isArray(fingerprint.histogram_rgb_4x4x4)
             ? fingerprint.histogram_rgb_4x4x4.map(Number)
             : [];
+          const neuralEmbedding = Array.isArray(fingerprint.neural_embedding)
+            ? fingerprint.neural_embedding.map(Number).filter(Number.isFinite)
+            : undefined;
+          const trainingEmbeddings = Array.isArray(fingerprint.training_embeddings)
+            ? fingerprint.training_embeddings
+                .filter(Array.isArray)
+                .map((embedding) => embedding.map(Number).filter(Number.isFinite))
+                .filter((embedding) => embedding.length > 0)
+            : undefined;
           const image = typeof item.image === 'string' ? item.image : '';
           const averageColor = typeof item.average_color === 'string' ? item.average_color : '';
           const typeId = Number(item.type_id);
@@ -779,6 +1011,8 @@
             cropDataUrl: image,
             sampleCircle: isRecord(item.sample_circle) ? (item.sample_circle as SampleCircle) : undefined,
             histogram,
+            neuralEmbedding,
+            trainingEmbeddings,
             sourceName: typeof item.source_name === 'string' ? item.source_name : file.name,
             note: typeof item.note === 'string' ? item.note : '',
             createdAt: typeof item.created_at === 'string' ? item.created_at : new Date().toISOString(),
@@ -797,6 +1031,29 @@
     } finally {
       input.value = '';
     }
+  }
+
+  async function importDetectorModel(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    try {
+      detectorModelMeta = await saveCapDetectorModel(file);
+      status = `ONNX-модель сохранена: ${file.name}`;
+      error = '';
+    } catch (modelError) {
+      error = modelError instanceof Error ? modelError.message : 'Не удалось сохранить ONNX-модель';
+      status = '';
+    } finally {
+      input.value = '';
+    }
+  }
+
+  async function removeDetectorModel() {
+    await clearCapDetectorModel();
+    detectorModelMeta = null;
+    status = 'ONNX-модель удалена.';
   }
 
   function formatSimilarity(score: number) {
@@ -830,11 +1087,30 @@
     persistDatasetSettings();
   }
 
+  function setManualAddMode(nextValue: boolean) {
+    manualAddMode = nextValue;
+  }
+
   onMount(() => {
     locale = detectBrowserLocale();
     document.documentElement.lang = locale;
+    detectorModelMeta = getCapDetectorModelMeta();
     restoreDatasetSettings();
     restoreDraft();
+    void (async () => {
+      await refreshTrainingBackendStatus();
+      if (!detectorModelMeta && trainingBackendOnline) {
+        await syncDetectorModelFromBackend(true);
+      }
+    })();
+    void refreshTrainingAnnotations();
+    const backendStatusInterval = window.setInterval(() => {
+      void refreshTrainingBackendStatus();
+    }, 5000);
+
+    return () => {
+      window.clearInterval(backendStatusInterval);
+    };
   });
 </script>
 
@@ -894,6 +1170,31 @@
     </div>
     <label class="nav-link upload-action" for="photoUpload">{t(locale, 'uploadPhoto')}</label>
     <input id="photoUpload" class="file-input" type="file" accept="image/*" multiple onchange={handlePhotoUpload} />
+    <div class="model-control">
+      <label class="nav-link model-action" for="detectorModelUpload">ONNX</label>
+      <input id="detectorModelUpload" class="file-input" type="file" accept=".onnx,application/octet-stream" onchange={importDetectorModel} />
+      <button class="nav-link model-action model-sync" disabled={detectorModelSyncing || !trainingBackendOnline} type="button" onclick={() => syncDetectorModelFromBackend(false)}>
+        ONNX ↓
+      </button>
+      {#if detectorModelMeta}
+        <span class="model-name" title={detectorModelMeta.name}>{detectorModelMeta.name}</span>
+        <button class="model-clear" type="button" aria-label="Удалить ONNX-модель" onclick={removeDetectorModel}>
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M4.2 4.2 11.8 11.8M11.8 4.2 4.2 11.8" />
+          </svg>
+        </button>
+      {/if}
+    </div>
+    <div class:online={trainingBackendOnline} class="training-status" title={trainingBackendLastSync || 'training backend'}>
+      <span class="training-dot"></span>
+      <strong>{trainingBackendOnline ? 'TRAIN' : 'OFF'}</strong>
+      {#if trainingBackendStats}
+        <span>{trainingBackendStats.accepted}+ / {trainingBackendStats.negative}-</span>
+      {/if}
+      {#if trainingBackendLastSync}
+        <em class:ok={trainingBackendLastSyncOk === true} class:fail={trainingBackendLastSyncOk === false}>{trainingBackendLastSync}</em>
+      {/if}
+    </div>
     <div class="topbar-actions">
       <nav class="mode-switch" aria-label={t(locale, 'modeNavLabel')}>
         <a class="active" href={`${base}/dataset`}>{t(locale, 'navDataset')}</a>
@@ -932,9 +1233,10 @@
                 <span><i class="legend-detected"></i>{t(locale, 'legendCandidate')}</span>
                 <span><i class="legend-crop"></i>{t(locale, 'legendCrop')}</span>
                 <span><i class="legend-color"></i>{t(locale, 'legendAverageColor')}</span>
+                <span><i class="legend-manual"></i>ручная область</span>
               </div>
             </div>
-            <div class="minimap" bind:this={minimapElement} onpointerdown={startMinimapDrag} onwheel={zoomMinimapAt}>
+            <div class:manual-add-mode={manualAddMode} class="minimap" bind:this={minimapElement} onpointerdown={startMinimapDrag} onwheel={zoomMinimapAt}>
               <div class="minimap-layer" style={getMinimapLayerStyle(pending.photo, minimapZoom, minimapPanX, minimapPanY)}>
                 <img draggable="false" src={pending.photo.source.dataUrl} alt={t(locale, 'sourcePhotoAlt')} />
                 {#if showDetectionDebug}
@@ -984,6 +1286,19 @@
                 <i aria-hidden="true"></i>
                 <span>{t(locale, 'lines')}</span>
               </button>
+              <button
+                class="debug-toggle minimap-manual-toggle"
+                type="button"
+                aria-pressed={manualAddMode}
+                onpointerdown={(event) => event.stopPropagation()}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  setManualAddMode(!manualAddMode);
+                }}
+              >
+                <i aria-hidden="true"></i>
+                <span>Manual</span>
+              </button>
             </div>
           </div>
 
@@ -996,6 +1311,22 @@
                 <span>→ #{pending.selectedTypeId}</span>
               {/if}
             </div>
+            {#if pending.photo.source.neuralStatus}
+              <div
+                class:used={pending.photo.source.neuralStatus.state === 'used'}
+                class:error-state={pending.photo.source.neuralStatus.state === 'error'}
+                class="neural-debug"
+                title={pending.photo.source.neuralStatus.message}
+              >
+                <strong>NN</strong>
+                <span>{pending.photo.source.neuralStatus.state}</span>
+                <span>{pending.photo.source.neuralStatus.selectedBoxes}/{pending.photo.source.neuralStatus.rawBoxes}</span>
+                {#if pending.photo.source.neuralStatus.outputShape}
+                  <span>{pending.photo.source.neuralStatus.outputShape}</span>
+                {/if}
+                <em>{pending.photo.source.neuralStatus.message}</em>
+              </div>
+            {/if}
 
             {#if status}
               <p class="status">{status}</p>
@@ -1028,6 +1359,25 @@
                 </div>
               </div>
             {/if}
+
+            <div class="crop-quality-row" aria-label="Оценка кропа для обучения">
+              <button
+                class:active={pending.cropReview === 'good'}
+                class="crop-quality good"
+                type="button"
+                onclick={() => markCropQuality(pending.id, 'good')}
+              >
+                Кроп ок
+              </button>
+              <button
+                class:active={pending.cropReview === 'bad'}
+                class="crop-quality bad"
+                type="button"
+                onclick={() => markCropQuality(pending.id, 'bad')}
+              >
+                Кроп плохой
+              </button>
+            </div>
 
             <div class="action-row">
               <button class="review-action confirm" onclick={() => addPendingSample(pending.id)}>{t(locale, 'add')}</button>
@@ -1065,6 +1415,62 @@
           <button class="wide-button" disabled={!samples.length} onclick={exportDataset}>{t(locale, 'export')}</button>
           <button class="wide-button danger" disabled={!samples.length} onclick={clearDraft}>{t(locale, 'clearDraft')}</button>
         </div>
+
+        <section class="training-review">
+          <header>
+            <strong>Разметка</strong>
+            {#if trainingBackendStats}
+              <span>{trainingBackendStats.accepted} good · {trainingBackendStats.negative} bad</span>
+            {/if}
+          </header>
+          <div class="training-review-tabs" aria-label="Фильтр обучающих кропов">
+            <button
+              class:active={trainingAnnotationsFilter === 'good'}
+              type="button"
+              onclick={() => setTrainingAnnotationsFilter('good')}
+            >
+              good
+            </button>
+            <button
+              class:active={trainingAnnotationsFilter === 'bad'}
+              type="button"
+              onclick={() => setTrainingAnnotationsFilter('bad')}
+            >
+              bad
+            </button>
+            <button class="training-refresh" type="button" disabled={trainingAnnotationsBusy} onclick={refreshTrainingAnnotations}>
+              ↻
+            </button>
+          </div>
+          <div class="training-crop-grid">
+            {#each trainingAnnotations as item}
+              <article class:bad={!item.accepted} class="training-crop-card">
+                {#if item.cropUrl}
+                  <img src={getTrainingCropUrl(item.cropUrl)} alt="" loading="lazy" title={item.sourceName ?? ''} />
+                {:else}
+                  <span class="training-crop-missing">нет фото</span>
+                {/if}
+                <span class="training-crop-meta">
+                  {#if item.typeId !== null}#{item.typeId}{:else}skip{/if}
+                  {#if item.averageColor}
+                    <i style={`--swatch: ${item.averageColor}`} title={item.averageColor}></i>
+                  {/if}
+                </span>
+                <button
+                  class="training-delete"
+                  type="button"
+                  aria-label="Удалить разметку"
+                  title="Удалить из обучения"
+                  onclick={() => removeTrainingAnnotation(item.id)}
+                >
+                  <svg aria-hidden="true" viewBox="0 0 16 16">
+                    <path d="M4.5 4.5 11.5 11.5M11.5 4.5 4.5 11.5" />
+                  </svg>
+                </button>
+              </article>
+            {/each}
+          </div>
+        </section>
 
         <div class="sample-grid">
           {#each getDraftTypeGroups() as group}
@@ -1258,6 +1664,103 @@
     min-width: 0;
   }
 
+  .model-control {
+    align-items: center;
+    display: flex;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .model-action {
+    min-height: 30px;
+    padding-inline: 9px;
+  }
+
+  .model-sync {
+    font-size: 12px;
+  }
+
+  .model-name {
+    color: var(--muted);
+    display: inline-block;
+    font-size: 12px;
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .model-clear {
+    border-radius: 999px;
+    height: 24px;
+    min-height: 24px;
+    padding: 0;
+    width: 24px;
+  }
+
+  .model-clear svg {
+    height: 14px;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-width: 2;
+    width: 14px;
+  }
+
+  .training-status {
+    align-items: center;
+    background: color-mix(in srgb, var(--control), #000 10%);
+    border: 1px solid rgba(248, 113, 113, 0.28);
+    border-radius: 999px;
+    color: var(--muted);
+    display: inline-flex;
+    flex: 0 0 auto;
+    font-size: 12px;
+    gap: 6px;
+    min-height: 30px;
+    padding: 4px 9px;
+    white-space: nowrap;
+  }
+
+  .training-status.online {
+    border-color: rgba(74, 222, 128, 0.35);
+    color: var(--text-strong);
+  }
+
+  .training-dot {
+    background: #f87171;
+    border-radius: 999px;
+    box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.1);
+    height: 8px;
+    width: 8px;
+  }
+
+  .training-status.online .training-dot {
+    background: #4ade80;
+    box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.12);
+  }
+
+  .training-status strong {
+    color: inherit;
+    font-size: 11px;
+    letter-spacing: 0;
+  }
+
+  .training-status em {
+    color: var(--muted);
+    font-style: normal;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .training-status em.ok {
+    color: #bbf7d0;
+  }
+
+  .training-status em.fail {
+    color: #fecaca;
+  }
+
   .mode-switch {
     background: var(--panel-2);
     border: 1px solid var(--line);
@@ -1386,6 +1889,46 @@
     margin: 0;
   }
 
+  .neural-debug {
+    align-items: center;
+    background: rgba(148, 163, 184, 0.12);
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    border-radius: 999px;
+    color: var(--muted);
+    display: inline-flex;
+    font-size: 11px;
+    gap: 7px;
+    justify-self: start;
+    min-height: 24px;
+    padding: 3px 9px;
+  }
+
+  .neural-debug strong {
+    color: var(--text-strong);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+  }
+
+  .neural-debug em {
+    font-style: normal;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .neural-debug.used {
+    background: rgba(239, 68, 68, 0.12);
+    border-color: rgba(239, 68, 68, 0.44);
+    color: #fecaca;
+  }
+
+  .neural-debug.error-state {
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.42);
+    color: #fde68a;
+  }
+
   .error {
     color: #fca5a5;
   }
@@ -1475,6 +2018,10 @@
 
   .legend-detected {
     background: #22c55e;
+  }
+
+  .legend-manual {
+    background: #f472b6;
   }
 
   .crop-preview img,
@@ -1571,9 +2118,31 @@
     cursor: grabbing;
   }
 
+  .minimap.manual-add-mode {
+    cursor: crosshair;
+  }
+
+  .minimap.manual-add-mode::after {
+    border: 1px dashed rgba(74, 222, 128, 0.75);
+    border-radius: 6px;
+    content: '';
+    inset: 8px;
+    pointer-events: none;
+    position: absolute;
+    z-index: 5;
+  }
+
   .minimap-debug-toggle {
     bottom: 10px;
-    left: 50%;
+    left: calc(50% - 48px);
+    position: absolute;
+    transform: translateX(-50%);
+    z-index: 6;
+  }
+
+  .minimap-manual-toggle {
+    bottom: 10px;
+    left: calc(50% + 58px);
     position: absolute;
     transform: translateX(-50%);
     z-index: 6;
@@ -1642,6 +2211,16 @@
     border-color: #a78bfa;
   }
 
+  .detection-box-neural {
+    border-color: #ef4444;
+    border-style: solid;
+    box-shadow:
+      0 0 0 1px rgba(239, 68, 68, 0.26),
+      0 0 16px rgba(239, 68, 68, 0.22);
+    opacity: 0.96;
+    z-index: 3;
+  }
+
   .detection-box-foreground {
     border-color: #f59e0b;
   }
@@ -1652,6 +2231,16 @@
 
   .detection-box-fallback {
     border-color: #94a3b8;
+  }
+
+  .detection-box-manual {
+    border-color: #f472b6;
+    border-style: solid;
+    box-shadow:
+      0 0 0 1px rgba(244, 114, 182, 0.25),
+      0 0 18px rgba(244, 114, 182, 0.28);
+    opacity: 0.96;
+    z-index: 3;
   }
 
   .crop-center {
@@ -1791,9 +2380,19 @@
     width: 10px;
   }
 
-  .debug-toggle[aria-checked='true'] i::after {
+  .debug-toggle[aria-checked='true'] i::after,
+  .debug-toggle[aria-pressed='true'] i::after {
     background: #38bdf8;
     transform: translateX(12px);
+  }
+
+  .minimap-manual-toggle[aria-pressed='true'] {
+    border-color: rgba(74, 222, 128, 0.55);
+    color: #bbf7d0;
+  }
+
+  .minimap-manual-toggle[aria-pressed='true'] i::after {
+    background: #4ade80;
   }
 
   .duplicate-card {
@@ -1861,6 +2460,45 @@
     z-index: 5;
   }
 
+  .crop-quality-row {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .crop-quality {
+    border-radius: 7px;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 700;
+    min-height: 38px;
+    padding: 0 10px;
+  }
+
+  .crop-quality.good {
+    background: rgba(34, 197, 94, 0.1);
+    border-color: rgba(74, 222, 128, 0.25);
+  }
+
+  .crop-quality.good:hover,
+  .crop-quality.good.active {
+    background: rgba(34, 197, 94, 0.2);
+    border-color: rgba(134, 239, 172, 0.48);
+    color: #bbf7d0;
+  }
+
+  .crop-quality.bad {
+    background: rgba(244, 114, 182, 0.1);
+    border-color: rgba(244, 114, 182, 0.25);
+  }
+
+  .crop-quality.bad:hover,
+  .crop-quality.bad.active {
+    background: rgba(244, 114, 182, 0.2);
+    border-color: rgba(249, 168, 212, 0.5);
+    color: #fbcfe8;
+  }
+
   .review-action {
     border-radius: 8px;
     font-size: 16px;
@@ -1920,7 +2558,7 @@
   .samples {
     display: grid;
     gap: 14px;
-    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-rows: auto auto auto minmax(0, 1fr);
     height: 100%;
     min-height: 0;
   }
@@ -1933,6 +2571,162 @@
 
   .draft-tools .danger {
     grid-column: 1 / -1;
+  }
+
+  .training-review {
+    background: color-mix(in srgb, var(--panel-2), transparent 34%);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 8px;
+    display: grid;
+    gap: 8px;
+    min-height: 0;
+    padding: 8px;
+  }
+
+  .training-review > header {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    justify-content: space-between;
+  }
+
+  .training-review > header strong {
+    color: var(--text-strong);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .training-review > header span {
+    color: var(--muted);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .training-review-tabs {
+    display: grid;
+    gap: 6px;
+    grid-template-columns: 1fr 1fr 34px;
+  }
+
+  .training-review-tabs button {
+    background: rgba(15, 23, 42, 0.2);
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    color: var(--muted);
+    min-height: 28px;
+    padding: 4px 8px;
+  }
+
+  .training-review-tabs button.active {
+    background: rgba(56, 189, 248, 0.12);
+    border-color: rgba(56, 189, 248, 0.45);
+    color: #e0f2fe;
+  }
+
+  .training-review-tabs .training-refresh {
+    font-size: 15px;
+    padding: 0;
+  }
+
+  .training-crop-grid {
+    display: grid;
+    gap: 6px;
+    grid-auto-rows: 54px;
+    grid-template-columns: repeat(auto-fill, minmax(54px, 1fr));
+    max-height: 126px;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 2px;
+  }
+
+  .training-crop-card {
+    aspect-ratio: 1;
+    background: var(--panel);
+    border: 1px solid rgba(74, 222, 128, 0.35);
+    border-radius: 7px;
+    min-width: 0;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .training-crop-card.bad {
+    border-color: rgba(248, 113, 113, 0.38);
+  }
+
+  .training-crop-card img {
+    display: block;
+    height: 100%;
+    object-fit: cover;
+    width: 100%;
+  }
+
+  .training-crop-missing {
+    align-items: center;
+    color: var(--muted);
+    display: flex;
+    font-size: 10px;
+    height: 100%;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .training-crop-meta {
+    align-items: center;
+    background: rgba(15, 23, 42, 0.66);
+    border-radius: 999px;
+    bottom: 3px;
+    color: #f8fafc;
+    display: flex;
+    font-size: 10px;
+    gap: 3px;
+    left: 3px;
+    max-width: calc(100% - 6px);
+    padding: 2px 5px;
+    position: absolute;
+  }
+
+  .training-crop-meta i {
+    background: var(--swatch);
+    border: 1px solid rgba(255, 255, 255, 0.55);
+    border-radius: 50%;
+    display: block;
+    height: 8px;
+    width: 8px;
+  }
+
+  .training-delete {
+    align-items: center;
+    background: rgba(15, 23, 42, 0.68);
+    border: 1px solid rgba(148, 163, 184, 0.34);
+    border-radius: 50%;
+    color: #cbd5e1;
+    display: flex;
+    height: 20px;
+    justify-content: center;
+    min-height: 0;
+    padding: 0;
+    position: absolute;
+    right: 3px;
+    top: 3px;
+    width: 20px;
+  }
+
+  .training-delete svg {
+    height: 12px;
+    width: 12px;
+  }
+
+  .training-delete path {
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-width: 1.8;
+  }
+
+  .training-delete:hover {
+    background: rgba(127, 29, 29, 0.72);
+    border-color: rgba(248, 113, 113, 0.76);
+    color: #fecaca;
   }
 
   .samples > header {

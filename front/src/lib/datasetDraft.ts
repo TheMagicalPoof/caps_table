@@ -12,6 +12,8 @@ export type DatasetDraftSample = {
     radius: number;
   };
   histogram: number[];
+  neuralEmbedding?: number[];
+  trainingEmbeddings?: number[][];
   quantity?: number;
   sourceName: string;
   note: string;
@@ -82,6 +84,30 @@ function getSampleCreatedTime(sample: DatasetDraftSample) {
   return Number.isFinite(timestamp) ? timestamp : Number.MAX_SAFE_INTEGER;
 }
 
+function mergeTrainingEmbeddings(samples: DatasetDraftSample[]) {
+  const embeddings: number[][] = [];
+  const seen = new Set<string>();
+
+  for (const sample of samples) {
+    const candidates = [
+      ...(sample.neuralEmbedding?.length ? [sample.neuralEmbedding] : []),
+      ...(sample.trainingEmbeddings ?? []),
+    ];
+
+    for (const embedding of candidates) {
+      if (!embedding.length) continue;
+
+      const key = embedding.map((value) => value.toFixed(5)).join(',');
+      if (seen.has(key)) continue;
+
+      seen.add(key);
+      embeddings.push(embedding);
+    }
+  }
+
+  return embeddings.slice(-48);
+}
+
 export function normalizeDatasetDraftSamples(samples: DatasetDraftSample[]) {
   const groups = new Map<number, DatasetDraftSample[]>();
   const samplesWithoutType: DatasetDraftSample[] = [];
@@ -108,6 +134,7 @@ export function normalizeDatasetDraftSamples(samples: DatasetDraftSample[]) {
       type_id: typeId,
       note,
       quantity,
+      trainingEmbeddings: mergeTrainingEmbeddings(typeSamples),
     };
   });
 

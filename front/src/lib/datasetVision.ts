@@ -1,3 +1,5 @@
+import { detectCapsWithStoredModel, getLastNeuralDetectorStatus, type NeuralDetectorStatus } from '$lib/neuralCapDetector';
+
 export type Rgb = [number, number, number];
 
 export type SampleCircle = {
@@ -11,7 +13,8 @@ export type DetectionBox = {
   y: number;
   width: number;
   height: number;
-  stage: 'circle' | 'foreground' | 'dense' | 'accepted' | 'fallback';
+  stage: 'manual' | 'neural' | 'circle' | 'foreground' | 'dense' | 'accepted' | 'fallback';
+  neuralEmbedding?: number[];
 };
 
 export type ProcessedCapPhoto = {
@@ -25,6 +28,7 @@ export type ProcessedCapPhoto = {
     height: number;
   };
   histogram: number[];
+  neuralEmbedding?: number[];
   sampleCircle: SampleCircle;
   source: {
     name: string;
@@ -34,12 +38,15 @@ export type ProcessedCapPhoto = {
     processedWidth: number;
     processedHeight: number;
     detectionBoxes?: DetectionBox[];
+    neuralStatus?: NeuralDetectorStatus;
   };
 };
 
 export type SampleFingerprint = {
   averageRgb: Rgb;
   histogram: number[];
+  neuralEmbedding?: number[];
+  trainingEmbeddings?: number[][];
 };
 
 export type DuplicateCandidate = {
@@ -54,6 +61,7 @@ const MIN_COMPONENT_AREA = 900;
 const GRID_CELL = 18;
 const MAX_DUPLICATE_COLOR_DISTANCE = 110;
 const MAX_DUPLICATE_HISTOGRAM_DISTANCE = 0.3;
+const MAX_DUPLICATE_NEURAL_DISTANCE = 0.24;
 const DUPLICATE_SCORE_THRESHOLD = 0.24;
 
 function clamp(value: number, lower = 0, upper = 255) {
@@ -729,6 +737,7 @@ function makeProcessedPhoto(
   foregroundBox: { x: number; y: number; width: number; height: number },
   source: ProcessedCapPhoto['source'],
   sampleCircle?: SampleCircle,
+  neuralEmbedding?: number[],
 ): ProcessedCapPhoto {
   const cropCanvas = document.createElement('canvas');
   cropCanvas.width = NORMALIZED_SIZE;
@@ -757,6 +766,7 @@ function makeProcessedPhoto(
     cropDataUrl: cropCanvas.toDataURL('image/jpeg', 0.9),
     foregroundBox,
     histogram: fingerprint.histogram,
+    neuralEmbedding,
     sampleCircle: fingerprint.sampleCircle,
     source,
   };
@@ -783,19 +793,36 @@ function sortBoxesForReadingOrder<T extends { x: number; y: number; width: numbe
 }
 
 function makeDetectionBoxes(
-  boxes: Array<{ x: number; y: number; width: number; height: number }>,
+  boxes: Array<{ x: number; y: number; width: number; height: number; neuralEmbedding?: number[] }>,
   stage: DetectionBox['stage'],
-  limit = 160,
 ): DetectionBox[] {
-  return sortBoxesForReadingOrder(boxes)
-    .slice(0, limit)
-    .map((box) => ({
+  return sortBoxesForReadingOrder(boxes).map((box) => ({
       x: box.x,
       y: box.y,
       width: box.width,
       height: box.height,
       stage,
+      neuralEmbedding: box.neuralEmbedding,
     }));
+}
+
+function detectClassicComponents(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  foregroundThreshold: number,
+) {
+  const circleComponents = detectCircleCandidates(data, width, height, foregroundThreshold);
+  const foregroundComponents = detectForegroundComponents(data, width, height, foregroundThreshold);
+  const denseComponents = detectDenseForegroundWindows(data, width, height, foregroundThreshold);
+  const components = mergeDetectedComponents([circleComponents, foregroundComponents, denseComponents]);
+
+  return {
+    circleComponents,
+    foregroundComponents,
+    denseComponents,
+    components,
+  };
 }
 
 export async function processCapBatchPhoto(file: File, foregroundThreshold: number): Promise<ProcessedCapPhoto[]> {
@@ -824,15 +851,22 @@ export async function processCapBatchPhoto(file: File, foregroundThreshold: numb
     ? squareBoxAround(rawForegroundBox, width, height, 0.08)
     : { x: 0, y: 0, width, height };
 
-  if (rawForegroundBox && isDominantSingleObject(rawForegroundBox, width, height)) {
+  let neuralComponents: DetectionBox[] | null = null;
+  try {
+    neuralComponents = await detectCapsWithStoredModel(sourceCanvas);
+  } catch (error) {
+    console.warn('Neural cap detector failed, falling back to classic CV', error);
+  }
+  source.neuralStatus = getLastNeuralDetectorStatus();
+
+  if (!neuralComponents?.length && rawForegroundBox && isDominantSingleObject(rawForegroundBox, width, height)) {
     source.detectionBoxes = makeDetectionBoxes([foregroundBox], 'fallback');
     return [makeProcessedPhoto(sourceCanvas, foregroundBox, source)];
   }
 
-  const circleComponents = detectCircleCandidates(sourceData.data, width, height, foregroundThreshold);
-  const foregroundComponents = detectForegroundComponents(sourceData.data, width, height, foregroundThreshold);
-  const denseComponents = detectDenseForegroundWindows(sourceData.data, width, height, foregroundThreshold);
-  const components = mergeDetectedComponents([circleComponents, foregroundComponents, denseComponents]);
+  const classic = neuralComponents?.length ? null : detectClassicComponents(sourceData.data, width, height, foregroundThreshold);
+  const components: Array<{ x: number; y: number; width: number; height: number; neuralEmbedding?: number[] }> =
+    neuralComponents?.length ? neuralComponents : (classic?.components ?? []);
 
   if (!components.length) {
     source.detectionBoxes = makeDetectionBoxes([foregroundBox], 'fallback');
@@ -840,18 +874,20 @@ export async function processCapBatchPhoto(file: File, foregroundThreshold: numb
   }
 
   const orderedComponents = sortBoxesForReadingOrder(components);
-  source.detectionBoxes = [
-    ...makeDetectionBoxes(circleComponents, 'circle'),
-    ...makeDetectionBoxes(foregroundComponents, 'foreground'),
-    ...makeDetectionBoxes(denseComponents, 'dense'),
-    ...makeDetectionBoxes(orderedComponents, 'accepted'),
-  ];
+  source.detectionBoxes = neuralComponents?.length
+    ? makeDetectionBoxes(orderedComponents, 'neural')
+    : [
+        ...makeDetectionBoxes(classic?.circleComponents ?? [], 'circle'),
+        ...makeDetectionBoxes(classic?.foregroundComponents ?? [], 'foreground'),
+        ...makeDetectionBoxes(classic?.denseComponents ?? [], 'dense'),
+        ...makeDetectionBoxes(orderedComponents, 'accepted'),
+      ];
 
   return orderedComponents.map((component, index) =>
     makeProcessedPhoto(sourceCanvas, component, {
       ...source,
       name: `${file.name} #${index + 1}`,
-    }),
+    }, undefined, component.neuralEmbedding),
   );
 }
 
@@ -919,6 +955,44 @@ function histogramDistance(a: number[], b: number[]) {
   return diff / 2;
 }
 
+function neuralEmbeddingDistance(a: number[] | undefined, b: number[] | undefined) {
+  if (!a?.length || !b?.length) return null;
+
+  const length = Math.min(a.length, b.length);
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let index = 0; index < length; index += 1) {
+    dot += a[index] * b[index];
+    normA += a[index] * a[index];
+    normB += b[index] * b[index];
+  }
+
+  const similarity = dot / Math.max(0.000001, Math.sqrt(normA) * Math.sqrt(normB));
+  return 1 - similarity;
+}
+
+function getKnownEmbeddings(sample: SampleFingerprint) {
+  return [
+    ...(sample.neuralEmbedding?.length ? [sample.neuralEmbedding] : []),
+    ...(sample.trainingEmbeddings ?? []),
+  ];
+}
+
+function bestNeuralEmbeddingDistance(current: SampleFingerprint, sample: SampleFingerprint) {
+  const embeddings = getKnownEmbeddings(sample);
+  let bestDistance: number | null = null;
+
+  for (const embedding of embeddings) {
+    const currentDistance = neuralEmbeddingDistance(current.neuralEmbedding, embedding);
+    if (currentDistance === null) continue;
+    bestDistance = bestDistance === null ? currentDistance : Math.min(bestDistance, currentDistance);
+  }
+
+  return bestDistance;
+}
+
 export function findDuplicateCandidates(
   current: SampleFingerprint,
   samples: SampleFingerprint[],
@@ -927,9 +1001,13 @@ export function findDuplicateCandidates(
     .map((sample, index) => {
       const colorDistance = distance(current.averageRgb, sample.averageRgb);
       const histogramDiff = histogramDistance(current.histogram, sample.histogram);
+      const neuralDistance = bestNeuralEmbeddingDistance(current, sample);
       const normalizedColorDistance = colorDistance / 441;
       const colorPenalty = Math.max(0, (colorDistance - 70) / 140);
-      const score = normalizedColorDistance * 0.55 + histogramDiff * 0.45 + colorPenalty * 0.35;
+      const score =
+        neuralDistance === null
+          ? normalizedColorDistance * 0.55 + histogramDiff * 0.45 + colorPenalty * 0.35
+          : neuralDistance * 0.72 + histogramDiff * 0.18 + normalizedColorDistance * 0.1;
 
       return {
         index,
@@ -940,8 +1018,9 @@ export function findDuplicateCandidates(
     })
     .filter(
       (candidate) =>
-        candidate.colorDistance <= MAX_DUPLICATE_COLOR_DISTANCE &&
-        candidate.histogramDistance <= MAX_DUPLICATE_HISTOGRAM_DISTANCE &&
+        ((current.neuralEmbedding?.length && getKnownEmbeddings(samples[candidate.index]).length && candidate.score <= MAX_DUPLICATE_NEURAL_DISTANCE) ||
+          (candidate.colorDistance <= MAX_DUPLICATE_COLOR_DISTANCE &&
+            candidate.histogramDistance <= MAX_DUPLICATE_HISTOGRAM_DISTANCE)) &&
         candidate.score < DUPLICATE_SCORE_THRESHOLD,
     )
     .sort((a, b) => a.score - b.score)

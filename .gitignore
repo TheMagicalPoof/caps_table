@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *.log
+*.pt
 
 /caps.json
 /front/.svelte-kit/
@@ -9,3 +10,5 @@ __pycache__/
 /front/node_modules/
 /front/test-results/
 /front/playwright-report/
+/training_backend/.venv/
+/training_backend/data/
