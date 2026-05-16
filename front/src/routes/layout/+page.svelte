@@ -798,16 +798,41 @@
     ];
   }
 
-  function getLowerHexNeighbors(row: number, col: number) {
-    return row % 2 === 0
-      ? [
-          [row + 1, col - 1],
-          [row + 1, col],
-        ]
-      : [
-          [row + 1, col],
-          [row + 1, col + 1],
-        ];
+  function getGradientOrder(cell: HexCell) {
+    const centerX = cell.x + capsDiameter / 2;
+    const centerY = cell.y + capsDiameter / 2;
+
+    if (gradientMode === 'radial') {
+      const dx = (centerX - tableWidth / 2) / Math.max(tableWidth / 2, 1);
+      const dy = (centerY - tableHeight / 2) / Math.max(tableHeight / 2, 1);
+      return {
+        primary: Math.sqrt(dx * dx + dy * dy),
+        secondary: Math.atan2(dy, dx),
+      };
+    }
+
+    const angle = (gradientAngle * Math.PI) / 180;
+    const ux = Math.cos(angle);
+    const uy = Math.sin(angle);
+
+    return {
+      primary: centerX * ux + centerY * uy,
+      secondary: centerX * -uy + centerY * ux,
+    };
+  }
+
+  function sortCellsForDithering(cellsToSort: HexCell[]) {
+    return [...cellsToSort].sort((a, b) => {
+      const aOrder = getGradientOrder(a);
+      const bOrder = getGradientOrder(b);
+      const primaryDelta = aOrder.primary - bOrder.primary;
+      if (Math.abs(primaryDelta) > 0.0001) return primaryDelta;
+
+      const secondaryDelta = aOrder.secondary - bOrder.secondary;
+      if (Math.abs(secondaryDelta) > 0.0001) return secondaryDelta;
+
+      return a.row - b.row || a.col - b.col;
+    });
   }
 
   function takeClosestCap(groups: ColorGroup[], desiredRgb: [number, number, number], neighborColors: string[]) {
@@ -862,15 +887,18 @@
     row: number,
     col: number,
     cellsByKey: Map<string, HexCell>,
+    cellOrder: Map<string, number>,
     colorError: [number, number, number],
   ) {
     const neighbors: Array<[string, number]> = [];
-    const sameRowNeighbor = row % 2 ? `${row},${col - 1}` : `${row},${col + 1}`;
-    if (cellsByKey.has(sameRowNeighbor)) neighbors.push([sameRowNeighbor, 1 / 3]);
+    const currentOrder = cellOrder.get(`${row},${col}`) ?? -1;
 
-    for (const [neighborRow, neighborCol] of getLowerHexNeighbors(row, col)) {
+    for (const [neighborRow, neighborCol] of getHexNeighbors(row, col)) {
       const key = `${neighborRow},${neighborCol}`;
-      if (cellsByKey.has(key)) neighbors.push([key, 1 / 3]);
+      const neighborOrder = cellOrder.get(key) ?? -1;
+      if (cellsByKey.has(key) && neighborOrder > currentOrder) {
+        neighbors.push([key, 1]);
+      }
     }
 
     if (!neighbors.length) return;
@@ -895,20 +923,14 @@
     const cells = generateHexCells(Number(tableHeight), Number(tableWidth), Number(capsDiameter));
     const usableCells = cells.slice(0, sourceCaps.length);
     const cellsByKey = new Map(usableCells.map((cell) => [`${cell.row},${cell.col}`, cell]));
+    const orderedCells = sortCellsForDithering(usableCells);
+    const cellOrder = new Map(orderedCells.map((cell, index) => [`${cell.row},${cell.col}`, index]));
     const groups = buildColorGroups(shuffle(sourceCaps));
     const errors = new Map<string, [number, number, number]>();
     const placedColors = new Map<string, string>();
     const assignments: Cap[] = [];
-    const cellsByRow = new Map<number, HexCell[]>();
-    for (const cell of usableCells) {
-      cellsByRow.set(cell.row, [...(cellsByRow.get(cell.row) ?? []), cell]);
-    }
-    const rows = [...cellsByRow.keys()].sort((a, b) => a - b);
 
-    for (const row of rows) {
-      const rowCells = [...(cellsByRow.get(row) ?? [])].sort((a, b) => (row % 2 ? b.col - a.col : a.col - b.col));
-
-      for (const cell of rowCells) {
+    for (const cell of orderedCells) {
         const key = `${cell.row},${cell.col}`;
         const error = errors.get(key) ?? [0, 0, 0];
         errors.delete(key);
@@ -932,6 +954,7 @@
           cell.row,
           cell.col,
           cellsByKey,
+          cellOrder,
           [desired[0] - picked.rgb[0], desired[1] - picked.rgb[1], desired[2] - picked.rgb[2]],
         );
 
@@ -946,7 +969,6 @@
           target_color: rgbToHex(target),
           type_id: picked.cap.type_id ?? 0,
         });
-      }
     }
 
     caps.clear();
