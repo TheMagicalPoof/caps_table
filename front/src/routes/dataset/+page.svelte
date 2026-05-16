@@ -13,7 +13,6 @@
     findDuplicateCandidates,
     processCapBatchPhoto,
     reprocessCapCrop,
-    reprocessCapSampling,
     type DetectionBox,
     type DuplicateCandidate,
     type ProcessedCapPhoto,
@@ -55,6 +54,7 @@
 
   let samples: DatasetSample[] = [];
   let pendingPhotos: PendingPhoto[] = [];
+  let retainedMinimapPhoto: ProcessedCapPhoto | null = null;
   const foregroundThreshold = 42;
   let status = '';
   let error = '';
@@ -65,6 +65,8 @@
   let minimapPanX = 0;
   let minimapPanY = 0;
   let minimapElement: HTMLElement | null = null;
+  let minimapPointer: { clientX: number; clientY: number } | null = null;
+  let isManualPlacement = false;
   let cropDrag:
     | {
         pendingId: string;
@@ -84,20 +86,11 @@
         startPanY: number;
       }
     | null = null;
-  let sampleDrag:
-    | {
-        pendingId: string;
-        mode: 'move' | 'resize';
-        startClientX: number;
-        startClientY: number;
-        startCircle: SampleCircle;
-        startPointerRadius: number;
-        previewRect: DOMRect;
-      }
-    | null = null;
-
   type CropBox = { x: number; y: number; width: number; height: number };
   const datasetSettingsKey = 'caps-table-dataset-settings';
+
+  $: activePending = pendingPhotos[0] ?? null;
+  $: reviewPhoto = activePending?.photo ?? retainedMinimapPhoto;
 
   function isRecord(value: unknown): value is Record<string, unknown> {
     return Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -108,7 +101,7 @@
   }
 
   function getActivePending() {
-    return pendingPhotos[0] ?? null;
+    return activePending;
   }
 
   function persistDraft() {
@@ -187,7 +180,7 @@
     const active = getActivePending();
     if (active) {
       focusMinimapOnPhoto(active.photo);
-    } else {
+    } else if (!retainedMinimapPhoto) {
       resetMinimapView();
     }
   }
@@ -220,6 +213,7 @@
 
     status = t(locale, 'processingPhotos', { count: imageFiles.length });
     error = '';
+    retainedMinimapPhoto = null;
     let foundCaps = 0;
 
     for (let index = 0; index < imageFiles.length; index += 1) {
@@ -234,6 +228,9 @@
         }
         const shouldFocusNewQueue = !pendingPhotos.length && nextPending.length > 0;
         pendingPhotos = [...pendingPhotos, ...nextPending];
+        if (nextPending.length) {
+          retainedMinimapPhoto = nextPending[0].photo;
+        }
         if (shouldFocusNewQueue) {
           await focusActivePendingMinimap();
         }
@@ -274,6 +271,7 @@
       const nextQuantity = getTypeQuantity(existingTypeId) + 1;
       samples = samples.map((sample) => (sample.type_id === existingTypeId ? { ...sample, quantity: nextQuantity } : sample));
       samples = normalizeDatasetDraftSamples(samples) as DatasetSample[];
+      retainedMinimapPhoto = pending.photo;
       pendingPhotos = pendingPhotos.filter((item) => item.id !== pendingId);
       persistDraft();
       status = t(locale, 'typeQuantityIncreased', { id: existingTypeId });
@@ -298,6 +296,7 @@
     };
 
     samples = normalizeDatasetDraftSamples([sample, ...samples]) as DatasetSample[];
+    retainedMinimapPhoto = pending.photo;
     pendingPhotos = pendingPhotos.filter((item) => item.id !== pendingId);
     persistDraft();
     status = t(locale, 'sampleAdded');
@@ -305,6 +304,10 @@
   }
 
   function skipPendingSample(pendingId: string) {
+    const pending = pendingPhotos.find((item) => item.id === pendingId);
+    if (pending) {
+      retainedMinimapPhoto = pending.photo;
+    }
     pendingPhotos = pendingPhotos.filter((item) => item.id !== pendingId);
     void focusActivePendingMinimap();
   }
@@ -364,49 +367,6 @@
     }
   }
 
-  function makeSampleCircle(centerX: number, centerY: number, radiusInput: number): SampleCircle {
-    const radius = clamp(Math.round(radiusInput), 12, 80);
-
-    return {
-      x: clamp(Math.round(centerX), radius, 160 - radius),
-      y: clamp(Math.round(centerY), radius, 160 - radius),
-      radius,
-    };
-  }
-
-  function getSampleRingStyle(photo: ProcessedCapPhoto) {
-    const circle = photo.sampleCircle;
-    const diameter = circle.radius * 2;
-
-    return `
-      --sx: ${((circle.x - circle.radius) / 160) * 100}%;
-      --sy: ${((circle.y - circle.radius) / 160) * 100}%;
-      --ss: ${(diameter / 160) * 100}%;
-    `;
-  }
-
-  async function applyPendingSampleCircle(pendingId: string, nextCircleInput: SampleCircle) {
-    const pending = pendingPhotos.find((item) => item.id === pendingId);
-    if (!pending) return;
-
-    const nextCircle = makeSampleCircle(nextCircleInput.x, nextCircleInput.y, nextCircleInput.radius);
-
-    try {
-      const photo = await reprocessCapSampling(pending.photo, nextCircle);
-      pendingPhotos = pendingPhotos.map((item) =>
-        item.id === pendingId
-          ? {
-              ...item,
-              photo,
-              duplicateCandidates: findDuplicateCandidates(photo, samples),
-            }
-          : item,
-      );
-    } catch (sampleError) {
-      error = sampleError instanceof Error ? sampleError.message : t(locale, 'updateColorAreaFailed');
-    }
-  }
-
   function getMinimapCropStyle(photo: ProcessedCapPhoto) {
     const box = photo.foregroundBox;
     const centerX = ((box.x + box.width / 2) / photo.source.processedWidth) * 100;
@@ -439,6 +399,8 @@
   }
 
   function getDetectionBoxLabel(stage: DetectionBox['stage']) {
+    if (stage === 'manual') return 'ручная область';
+    if (stage === 'neural') return 'нейросеть';
     if (stage === 'accepted') return t(locale, 'detectionAccepted');
     if (stage === 'circle') return t(locale, 'detectionCircle');
     if (stage === 'foreground') return t(locale, 'detectionForeground');
@@ -603,85 +565,121 @@
     minimapPanY = event.clientY - minimapCenterY - pointerContentY * nextZoom;
   }
 
-  function startSampleDrag(event: PointerEvent, pendingId: string, mode: 'move' | 'resize') {
-    const pending = pendingPhotos.find((item) => item.id === pendingId);
-    const preview = event.currentTarget instanceof HTMLElement ? event.currentTarget.closest('.crop-preview') : null;
-    if (!pending || !(preview instanceof HTMLElement)) return;
+  function getManualCropBox(photo: ProcessedCapPhoto, pointer = minimapPointer) {
+    const sourceWidth = photo.source.processedWidth;
+    const sourceHeight = photo.source.processedHeight;
+    const minDimension = Math.min(sourceWidth, sourceHeight);
+    const defaultSize = clamp(
+      Math.round(Math.min(photo.foregroundBox.width, photo.foregroundBox.height) || minDimension * 0.12),
+      24,
+      minDimension,
+    );
+    const layer = minimapElement?.querySelector('.minimap-layer');
+    const minimapRect = minimapElement?.getBoundingClientRect();
 
-    event.preventDefault();
-    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-    const previewRect = preview.getBoundingClientRect();
-    const scale = 160 / previewRect.width;
-    const pointerX = (event.clientX - previewRect.left) * scale;
-    const pointerY = (event.clientY - previewRect.top) * scale;
-    sampleDrag = {
-      pendingId,
-      mode,
-      startClientX: event.clientX,
-      startClientY: event.clientY,
-      startCircle: { ...pending.photo.sampleCircle },
-      startPointerRadius: Math.hypot(pointerX - pending.photo.sampleCircle.x, pointerY - pending.photo.sampleCircle.y),
-      previewRect,
+    if (layer instanceof HTMLElement && minimapRect && minimapRect.width && minimapRect.height) {
+      const layerRect = layer.getBoundingClientRect();
+      const point =
+        pointer &&
+        pointer.clientX >= minimapRect.left &&
+        pointer.clientX <= minimapRect.right &&
+        pointer.clientY >= minimapRect.top &&
+        pointer.clientY <= minimapRect.bottom
+          ? pointer
+          : {
+              clientX: minimapRect.left + minimapRect.width / 2,
+              clientY: minimapRect.top + minimapRect.height / 2,
+            };
+      const centerX = ((point.clientX - layerRect.left) / layerRect.width) * sourceWidth;
+      const centerY = ((point.clientY - layerRect.top) / layerRect.height) * sourceHeight;
+      return makeCenteredCropBox(centerX, centerY, defaultSize, sourceWidth, sourceHeight);
+    }
+
+    return makeCenteredCropBox(sourceWidth / 2, sourceHeight / 2, defaultSize, sourceWidth, sourceHeight);
+  }
+
+  function rememberMinimapPointer(event: PointerEvent) {
+    minimapPointer = {
+      clientX: event.clientX,
+      clientY: event.clientY,
     };
   }
 
-  function moveSampleDrag(event: PointerEvent) {
-    if (!sampleDrag) return;
+  async function addManualCandidate(photoInput?: ProcessedCapPhoto | string | null, pointer = minimapPointer) {
+    const sourcePhoto =
+      typeof photoInput === 'string'
+        ? pendingPhotos.find((item) => item.id === photoInput)?.photo
+        : photoInput ?? reviewPhoto;
+    if (!sourcePhoto) return;
 
-    const pending = pendingPhotos.find((item) => item.id === sampleDrag?.pendingId);
-    if (!pending) return;
+    const nextBox = getManualCropBox(sourcePhoto, pointer);
 
-    const scale = 160 / sampleDrag.previewRect.width;
-    const dx = (event.clientX - sampleDrag.startClientX) * scale;
-    const dy = (event.clientY - sampleDrag.startClientY) * scale;
-    let nextCircle: SampleCircle;
+    try {
+      const photo = await reprocessCapCrop(sourcePhoto, nextBox);
+      const manualBox: DetectionBox = {
+        ...nextBox,
+        stage: 'manual',
+      };
+      const manualPhoto = {
+        ...photo,
+        source: {
+          ...photo.source,
+          detectionBoxes: [...(photo.source.detectionBoxes ?? []), manualBox],
+        },
+      };
 
-    if (sampleDrag.mode === 'move') {
-      nextCircle = makeSampleCircle(
-        sampleDrag.startCircle.x + dx,
-        sampleDrag.startCircle.y + dy,
-        sampleDrag.startCircle.radius,
-      );
-    } else {
-      const pointerX = (event.clientX - sampleDrag.previewRect.left) * scale;
-      const pointerY = (event.clientY - sampleDrag.previewRect.top) * scale;
-      const pointerRadius = Math.hypot(pointerX - sampleDrag.startCircle.x, pointerY - sampleDrag.startCircle.y);
-      const radiusDelta = pointerRadius - sampleDrag.startPointerRadius;
-      const maxRadius = Math.min(
-        sampleDrag.startCircle.x,
-        160 - sampleDrag.startCircle.x,
-        sampleDrag.startCircle.y,
-        160 - sampleDrag.startCircle.y,
-      );
-      nextCircle = makeSampleCircle(
-        sampleDrag.startCircle.x,
-        sampleDrag.startCircle.y,
-        clamp(sampleDrag.startCircle.radius + radiusDelta, 12, maxRadius),
-      );
+      pendingPhotos = [
+        {
+          id: crypto.randomUUID(),
+          photo: manualPhoto,
+          duplicateCandidates: findDuplicateCandidates(manualPhoto, samples),
+          similarPendingCount: 0,
+          selectedTypeId: null,
+          note: '',
+        },
+        ...pendingPhotos,
+      ];
+      retainedMinimapPhoto = photo;
+      isManualPlacement = false;
+      status = 'Ручной кандидат добавлен. Передвинь синюю рамку на крышку и нажми добавить.';
+      await focusActivePendingMinimap();
+    } catch (manualError) {
+      error = manualError instanceof Error ? manualError.message : t(locale, 'updateCropFailed');
     }
-
-    pendingPhotos = pendingPhotos.map((item) =>
-      item.id === pending.id
-        ? {
-            ...item,
-            photo: {
-              ...item.photo,
-              sampleCircle: nextCircle,
-            },
-          }
-        : item,
-    );
   }
 
-  async function finishSampleDrag() {
-    if (!sampleDrag) return;
+  function toggleManualPlacement() {
+    isManualPlacement = !isManualPlacement;
+    if (isManualPlacement) {
+      resetMinimapView();
+    }
+    status = isManualPlacement ? 'Кликни по крышке на миникарте.' : '';
+    error = '';
+  }
 
-    const pendingId = sampleDrag.pendingId;
-    sampleDrag = null;
-    const pending = pendingPhotos.find((item) => item.id === pendingId);
-    if (!pending) return;
+  function getManualPlacementStyle() {
+    if (!minimapPointer || !minimapElement) return '';
 
-    await applyPendingSampleCircle(pendingId, pending.photo.sampleCircle);
+    const rect = minimapElement.getBoundingClientRect();
+    if (!rect.width || !rect.height) return '';
+
+    const x = clamp(((minimapPointer.clientX - rect.left) / rect.width) * 100, 0, 100);
+    const y = clamp(((minimapPointer.clientY - rect.top) / rect.height) * 100, 0, 100);
+
+    return `--mx: ${x}%; --my: ${y}%;`;
+  }
+
+  function handleMinimapPointerDown(event: PointerEvent) {
+    rememberMinimapPointer(event);
+
+    if (isManualPlacement) {
+      event.preventDefault();
+      event.stopPropagation();
+      void addManualCandidate(reviewPhoto, { clientX: event.clientX, clientY: event.clientY });
+      return;
+    }
+
+    startMinimapDrag(event);
   }
 
   function updateTypeNote(typeId: number, nextNote: string) {
@@ -712,8 +710,18 @@
   function clearDraft() {
     samples = [];
     pendingPhotos = [];
+    retainedMinimapPhoto = null;
     clearDatasetDraft();
     status = t(locale, 'draftCleared');
+  }
+
+  function resetRetainedMinimap() {
+    pendingPhotos = [];
+    retainedMinimapPhoto = null;
+    isManualPlacement = false;
+    status = '';
+    error = '';
+    resetMinimapView();
   }
 
   function exportDataset() {
@@ -842,17 +850,14 @@
   onpointermove={(event) => {
     moveMinimapDrag(event);
     moveCropDrag(event);
-    moveSampleDrag(event);
   }}
   onpointerup={() => {
     finishMinimapDrag();
     finishCropDrag();
-    finishSampleDrag();
   }}
   onpointercancel={() => {
     finishMinimapDrag();
     finishCropDrag();
-    finishSampleDrag();
   }}
 />
 
@@ -905,89 +910,104 @@
   <section class="workspace">
 
     <section class="review-pane">
-      {#if getActivePending()}
-        {@const pending = getActivePending()!}
+      {#if reviewPhoto}
+        {@const pending = activePending}
         <section class="current-sample">
           <div class="preview">
-            <div class="crop-preview-row">
-              <div class="crop-preview">
-                <img src={pending.photo.cropDataUrl} alt={t(locale, 'cropPreviewAlt')} />
-                <button
-                  class="color-sample-ring"
-                  aria-label={t(locale, 'moveColorSampleArea')}
-                  style={getSampleRingStyle(pending.photo)}
-                  onpointerdown={(event) => startSampleDrag(event, pending.id, 'move')}
-                >
-                  <span class="sample-center"></span>
-                  <span
-                    class="sample-handle"
-                    onpointerdown={(event) => {
-                      event.stopPropagation();
-                      startSampleDrag(event, pending.id, 'resize');
-                    }}
-                  ></span>
-                </button>
+            {#if pending}
+              <div class="crop-preview-row">
+                <div class="crop-preview">
+                  <img src={pending.photo.cropDataUrl} alt={t(locale, 'cropPreviewAlt')} />
+                </div>
+                <div class="crop-legend" aria-label={t(locale, 'cropLegendLabel')}>
+                  <span><i class="legend-detected"></i>{t(locale, 'legendCandidate')}</span>
+                  <span><i class="legend-crop"></i>{t(locale, 'legendCrop')}</span>
+                </div>
               </div>
-              <div class="crop-legend" aria-label={t(locale, 'cropLegendLabel')}>
-                <span><i class="legend-detected"></i>{t(locale, 'legendCandidate')}</span>
-                <span><i class="legend-crop"></i>{t(locale, 'legendCrop')}</span>
-                <span><i class="legend-color"></i>{t(locale, 'legendAverageColor')}</span>
-              </div>
-            </div>
-            <div class="minimap" bind:this={minimapElement} onpointerdown={startMinimapDrag} onwheel={zoomMinimapAt}>
-              <div class="minimap-layer" style={getMinimapLayerStyle(pending.photo, minimapZoom, minimapPanX, minimapPanY)}>
-                <img draggable="false" src={pending.photo.source.dataUrl} alt={t(locale, 'sourcePhotoAlt')} />
+            {/if}
+            <div
+              class="minimap"
+              bind:this={minimapElement}
+              class:manual-placement={isManualPlacement}
+              onpointerdown={handleMinimapPointerDown}
+              onpointermove={rememberMinimapPointer}
+              onpointerleave={() => {
+                minimapPointer = null;
+              }}
+              onwheel={zoomMinimapAt}
+            >
+              <div class="minimap-layer" style={getMinimapLayerStyle(reviewPhoto, minimapZoom, minimapPanX, minimapPanY)}>
+                <img draggable="false" src={reviewPhoto.source.dataUrl} alt={t(locale, 'sourcePhotoAlt')} />
                 {#if showDetectionDebug}
-                  {#each (pending.photo.source.detectionBoxes ?? []).filter(isVisibleDetectionBox) as box}
+                  {#each (reviewPhoto.source.detectionBoxes ?? []).filter(isVisibleDetectionBox) as box}
                     <span
                       class={`detection-box detection-box-${box.stage}`}
-                      style={getDetectionBoxStyle(pending.photo, box)}
+                      style={getDetectionBoxStyle(reviewPhoto, box)}
                       title={getDetectionBoxLabel(box.stage)}
                     ></span>
                   {/each}
                 {/if}
-                <div
-                  class="crop-box"
-                  style={getMinimapCropStyle(pending.photo)}
-                >
-                  <button
-                    class="crop-center crop-control"
-                    aria-label={t(locale, 'moveCrop')}
-                    type="button"
-                    onpointerdown={(event) => {
-                      event.stopPropagation();
-                      startCropDrag(event, pending.id, 'move');
-                    }}
-                  ></button>
-                  <button
-                    class="crop-handle crop-control"
-                    aria-label={t(locale, 'resizeCrop')}
-                    type="button"
-                    onpointerdown={(event) => {
-                      event.stopPropagation();
-                      startCropDrag(event, pending.id, 'resize');
-                    }}
-                  ></button>
-                </div>
+                {#if pending}
+                  <div
+                    class="crop-box"
+                    style={getMinimapCropStyle(pending.photo)}
+                  >
+                    <button
+                      class="crop-center crop-control"
+                      aria-label={t(locale, 'moveCrop')}
+                      type="button"
+                      onpointerdown={(event) => {
+                        event.stopPropagation();
+                        startCropDrag(event, pending.id, 'move');
+                      }}
+                    ></button>
+                    <button
+                      class="crop-handle crop-control"
+                      aria-label={t(locale, 'resizeCrop')}
+                      type="button"
+                      onpointerdown={(event) => {
+                        event.stopPropagation();
+                        startCropDrag(event, pending.id, 'resize');
+                      }}
+                    ></button>
+                  </div>
+                {/if}
               </div>
-              <button
-                class="debug-toggle minimap-debug-toggle"
-                type="button"
-                role="switch"
-                aria-checked={showDetectionDebug}
-                onpointerdown={(event) => event.stopPropagation()}
-                onclick={(event) => {
-                  event.stopPropagation();
-                  setDetectionDebug(!showDetectionDebug);
-                }}
-              >
-                <i aria-hidden="true"></i>
-                <span>{t(locale, 'lines')}</span>
-              </button>
+              {#if isManualPlacement && minimapPointer}
+                <span class="manual-placement-marker" style={getManualPlacementStyle()}></span>
+              {/if}
+              <div class="minimap-tools" onpointerdown={(event) => event.stopPropagation()}>
+                <button
+                  class="debug-toggle"
+                  type="button"
+                  role="switch"
+                  aria-checked={showDetectionDebug}
+                  onpointermove={rememberMinimapPointer}
+                  onclick={(event) => {
+                    event.stopPropagation();
+                    setDetectionDebug(!showDetectionDebug);
+                  }}
+                >
+                  <i aria-hidden="true"></i>
+                  <span>Кандидаты</span>
+                </button>
+                <button
+                  type="button"
+                  class="minimap-tool-button manual"
+                  class:active={isManualPlacement}
+                  onclick={() => {
+                    toggleManualPlacement();
+                  }}
+                >
+                  + вручную
+                </button>
+                <button type="button" class="minimap-tool-button" onclick={resetRetainedMinimap}>Reset</button>
+              </div>
             </div>
           </div>
 
           <div class="sample-info">
+            {#if pending}
             <div class="color-row">
               <span class="color-label">{t(locale, 'averageColor')}</span>
               <span class="swatch" style={`--swatch: ${pending.photo.averageColor}`}></span>
@@ -996,6 +1016,11 @@
                 <span>→ #{pending.selectedTypeId}</span>
               {/if}
             </div>
+            {:else}
+              <div class="color-row">
+                <span class="color-label">Кандидаты закончились. Миникарта удерживает последнее фото.</span>
+              </div>
+            {/if}
 
             {#if status}
               <p class="status">{status}</p>
@@ -1004,7 +1029,7 @@
               <p class="error">{error}</p>
             {/if}
 
-            {#if pending.duplicateCandidates.length}
+            {#if pending?.duplicateCandidates.length}
               <div class="duplicates">
                 <h3>{t(locale, 'similarToTitle')}</h3>
                 <div class="duplicate-grid">
@@ -1029,10 +1054,14 @@
               </div>
             {/if}
 
+            {#if pending}
             <div class="action-row">
-              <button class="review-action confirm" onclick={() => addPendingSample(pending.id)}>{t(locale, 'add')}</button>
-              <button class="review-action reject" onclick={() => skipPendingSample(pending.id)}>{t(locale, 'skip')}</button>
+              <button type="button" class="review-action confirm" onclick={() => addPendingSample(pending.id)}>{t(locale, 'add')}</button>
+              <button type="button" class="review-action reject" onclick={() => skipPendingSample(pending.id)}>{t(locale, 'skip')}</button>
             </div>
+            {:else}
+              <span class="queue-note">Можно добавить пропущенную крышку вручную прямо на миникарте.</span>
+            {/if}
             <span class="queue-note">{t(locale, 'queue', { value: formatCandidateCount(pendingPhotos.length) })}</span>
           </div>
         </section>
@@ -1469,10 +1498,6 @@
     background: #38bdf8;
   }
 
-  .legend-color {
-    background: #f59e0b;
-  }
-
   .legend-detected {
     background: #22c55e;
   }
@@ -1485,70 +1510,6 @@
     display: block;
     object-fit: cover;
     width: 100%;
-  }
-
-  .color-sample-ring {
-    appearance: none;
-    background: transparent;
-    border: 2px dashed rgba(245, 158, 11, 0.96);
-    border-radius: 50%;
-    box-shadow:
-      0 0 0 1px rgba(6, 18, 31, 0.9),
-      0 0 18px rgba(245, 158, 11, 0.38),
-      inset 0 0 0 1px rgba(255, 247, 237, 0.42);
-    cursor: move;
-    display: block;
-    height: var(--ss);
-    left: var(--sx);
-    min-height: 0;
-    padding: 0;
-    position: absolute;
-    top: var(--sy);
-    touch-action: none;
-    width: var(--ss);
-  }
-
-  .color-sample-ring:hover,
-  .color-sample-ring:focus,
-  .color-sample-ring:focus-visible {
-    background: transparent;
-    outline: none;
-  }
-
-  .color-sample-ring:focus-visible {
-    box-shadow:
-      0 0 0 1px rgba(6, 18, 31, 0.9),
-      0 0 0 4px rgba(245, 158, 11, 0.28),
-      0 0 18px rgba(245, 158, 11, 0.38),
-      inset 0 0 0 1px rgba(255, 247, 237, 0.42);
-  }
-
-  .sample-center {
-    background: #f59e0b;
-    border: 1px solid #06121f;
-    border-radius: 50%;
-    box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
-    height: 14px;
-    left: 50%;
-    pointer-events: none;
-    position: absolute;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    width: 14px;
-  }
-
-  .sample-handle {
-    background: #f59e0b;
-    border: 1px solid #06121f;
-    border-radius: 50%;
-    bottom: 14.64%;
-    cursor: nwse-resize;
-    height: 14px;
-    position: absolute;
-    right: 14.64%;
-    transform: translate(50%, 50%);
-    touch-action: none;
-    width: 14px;
   }
 
   .minimap {
@@ -1571,8 +1532,16 @@
     cursor: grabbing;
   }
 
-  .minimap-debug-toggle {
+  .minimap.manual-placement,
+  .minimap.manual-placement:active {
+    cursor: crosshair;
+  }
+
+  .minimap-tools {
+    align-items: center;
     bottom: 10px;
+    display: inline-flex;
+    gap: 6px;
     left: 50%;
     position: absolute;
     transform: translateX(-50%);
@@ -1588,6 +1557,39 @@
     transform: translate(calc(-50% + var(--pan-x, 0)), calc(-50% + var(--pan-y, 0)));
     transform-origin: center;
     width: var(--layer-width);
+  }
+
+  .manual-placement-marker {
+    border: 2px solid #f9a8d4;
+    border-radius: 50%;
+    height: 22px;
+    left: var(--mx);
+    pointer-events: none;
+    position: absolute;
+    top: var(--my);
+    transform: translate(-50%, -50%);
+    width: 22px;
+    z-index: 7;
+  }
+
+  .manual-placement-marker::before,
+  .manual-placement-marker::after {
+    background: #f9a8d4;
+    content: '';
+    left: 50%;
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  .manual-placement-marker::before {
+    height: 2px;
+    width: 34px;
+  }
+
+  .manual-placement-marker::after {
+    height: 34px;
+    width: 2px;
   }
 
   .minimap img {
@@ -1633,8 +1635,8 @@
   .detection-box-accepted {
     border-color: #22c55e;
     border-style: solid;
-    box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.2);
-    opacity: 0.94;
+    border-width: 2px;
+    opacity: 1;
     z-index: 3;
   }
 
@@ -1652,6 +1654,22 @@
 
   .detection-box-fallback {
     border-color: #94a3b8;
+  }
+
+  .detection-box-neural {
+    border-color: #22c55e;
+    border-style: solid;
+    border-width: 2px;
+    opacity: 1;
+    z-index: 3;
+  }
+
+  .detection-box-manual {
+    border-color: #ec4899;
+    border-style: solid;
+    box-shadow: 0 0 0 1px rgba(236, 72, 153, 0.22);
+    opacity: 0.94;
+    z-index: 3;
   }
 
   .crop-center {
@@ -1706,15 +1724,17 @@
   }
 
   .sample-info {
-    align-self: start;
-    display: grid;
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
     gap: 14px;
     grid-column: 2;
     grid-row: 3;
-    max-height: calc(100vh - 392px);
+    height: 100%;
+    max-height: 100%;
     max-width: 100%;
     min-height: 0;
-    overflow: auto;
+    overflow: hidden;
     padding-right: 4px;
     scrollbar-gutter: stable;
   }
@@ -1740,9 +1760,12 @@
   }
 
   .duplicates {
-    display: grid;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
     gap: 8px;
     min-height: 0;
+    overflow: hidden;
   }
 
   .duplicates h3 {
@@ -1754,6 +1777,10 @@
     display: grid;
     gap: 8px;
     grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+    min-height: 0;
+    overflow: auto;
+    padding-right: 2px;
+    scrollbar-gutter: stable;
   }
 
   .debug-toggle {
@@ -1768,6 +1795,33 @@
     min-height: 36px;
     padding: 0 10px;
     white-space: nowrap;
+  }
+
+  .minimap-tool-button {
+    background: color-mix(in srgb, var(--panel-2), transparent 35%);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--text-strong);
+    font-size: 12px;
+    min-height: 36px;
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+
+  .minimap-tool-button.manual {
+    border-color: rgba(244, 114, 182, 0.34);
+    color: #fbcfe8;
+  }
+
+  .minimap-tool-button.manual.active {
+    background: rgba(236, 72, 153, 0.24);
+    border-color: rgba(249, 168, 212, 0.62);
+    color: #fce7f3;
+  }
+
+  .minimap-tool-button:hover {
+    background: color-mix(in srgb, var(--panel-2), transparent 18%);
+    border-color: var(--accent);
   }
 
   .debug-toggle i {
@@ -1849,16 +1903,18 @@
   }
 
   .action-row {
-    background:
-      linear-gradient(to bottom, color-mix(in srgb, var(--bg), transparent 100%), var(--bg) 18%),
-      var(--bg);
-    bottom: 0;
+    background: var(--bg);
     display: grid;
+    flex: 0 0 auto;
     gap: 12px;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-top: auto;
     padding-top: 10px;
-    position: sticky;
     z-index: 5;
+  }
+
+  .queue-note {
+    flex: 0 0 auto;
   }
 
   .review-action {
@@ -1893,6 +1949,19 @@
     background: linear-gradient(180deg, rgba(239, 68, 68, 0.32), rgba(153, 27, 27, 0.25));
     border-color: rgba(252, 165, 165, 0.56);
     color: #fee2e2;
+  }
+
+  .review-action.manual {
+    background: linear-gradient(180deg, rgba(236, 72, 153, 0.18), rgba(157, 23, 77, 0.14));
+    border-color: rgba(244, 114, 182, 0.34);
+    color: #fbcfe8;
+    grid-column: 1 / -1;
+  }
+
+  .review-action.manual:hover {
+    background: linear-gradient(180deg, rgba(236, 72, 153, 0.26), rgba(157, 23, 77, 0.2));
+    border-color: rgba(249, 168, 212, 0.54);
+    color: #fce7f3;
   }
 
   .secondary {
