@@ -299,7 +299,7 @@
     retainedMinimapPhoto = pending.photo;
     pendingPhotos = pendingPhotos.filter((item) => item.id !== pendingId);
     persistDraft();
-    status = t(locale, 'sampleAdded');
+    status = '';
     void focusActivePendingMinimap();
   }
 
@@ -314,6 +314,23 @@
 
   function updatePendingType(pendingId: string, typeId: number | null) {
     pendingPhotos = pendingPhotos.map((item) => (item.id === pendingId ? { ...item, selectedTypeId: typeId } : item));
+  }
+
+  function addPendingAsDuplicate(pendingId: string, typeId: number | null) {
+    if (typeId === null || !samples.some((sample) => sample.type_id === typeId)) return;
+
+    const pending = pendingPhotos.find((item) => item.id === pendingId);
+    if (!pending) return;
+
+    const nextQuantity = getTypeQuantity(typeId) + 1;
+    samples = normalizeDatasetDraftSamples(
+      samples.map((sample) => (sample.type_id === typeId ? { ...sample, quantity: nextQuantity } : sample)),
+    ) as DatasetSample[];
+    retainedMinimapPhoto = pending.photo;
+    pendingPhotos = pendingPhotos.filter((item) => item.id !== pendingId);
+    persistDraft();
+    status = '';
+    void focusActivePendingMinimap();
   }
 
   function makeCenteredCropBox(centerX: number, centerY: number, sizeInput: number, sourceWidth: number, sourceHeight: number): CropBox {
@@ -919,10 +936,6 @@
                 <div class="crop-preview">
                   <img src={pending.photo.cropDataUrl} alt={t(locale, 'cropPreviewAlt')} />
                 </div>
-                <div class="crop-legend" aria-label={t(locale, 'cropLegendLabel')}>
-                  <span><i class="legend-detected"></i>{t(locale, 'legendCandidate')}</span>
-                  <span><i class="legend-crop"></i>{t(locale, 'legendCrop')}</span>
-                </div>
               </div>
             {/if}
             <div
@@ -976,6 +989,10 @@
               {#if isManualPlacement && minimapPointer}
                 <span class="manual-placement-marker" style={getManualPlacementStyle()}></span>
               {/if}
+              <div class="crop-legend minimap-legend" aria-label={t(locale, 'cropLegendLabel')}>
+                <span><i class="legend-crop"></i>{t(locale, 'legendCrop')}</span>
+                <span><i class="legend-detected"></i>{t(locale, 'legendCandidate')}</span>
+              </div>
               <div class="minimap-tools" onpointerdown={(event) => event.stopPropagation()}>
                 <button
                   class="debug-toggle"
@@ -1001,7 +1018,7 @@
                 >
                   + вручную
                 </button>
-                <button type="button" class="minimap-tool-button" onclick={resetRetainedMinimap}>Reset</button>
+                <button type="button" class="minimap-tool-button" onclick={resetRetainedMinimap}>Сбросить</button>
               </div>
             </div>
           </div>
@@ -1016,10 +1033,6 @@
                 <span>→ #{pending.selectedTypeId}</span>
               {/if}
             </div>
-            {:else}
-              <div class="color-row">
-                <span class="color-label">Кандидаты закончились. Миникарта удерживает последнее фото.</span>
-              </div>
             {/if}
 
             {#if status}
@@ -1035,7 +1048,7 @@
                 <div class="duplicate-grid">
                   {#each pending.duplicateCandidates.slice(0, 5) as candidate}
                     {@const sample = samples[candidate.index]}
-                    <button class="duplicate-card" onclick={() => updatePendingType(pending.id, sample.type_id)}>
+                    <button class="duplicate-card" onclick={() => addPendingAsDuplicate(pending.id, sample.type_id)}>
                       <span class="duplicate-card-header">
                         <strong>#{sample.type_id ?? t(locale, 'noType')}</strong>
                         <span
@@ -1059,10 +1072,10 @@
               <button type="button" class="review-action confirm" onclick={() => addPendingSample(pending.id)}>{t(locale, 'add')}</button>
               <button type="button" class="review-action reject" onclick={() => skipPendingSample(pending.id)}>{t(locale, 'skip')}</button>
             </div>
-            {:else}
-              <span class="queue-note">Можно добавить пропущенную крышку вручную прямо на миникарте.</span>
             {/if}
-            <span class="queue-note">{t(locale, 'queue', { value: formatCandidateCount(pendingPhotos.length) })}</span>
+            {#if pendingPhotos.length}
+              <span class="queue-note">{t(locale, 'queue', { value: formatCandidateCount(pendingPhotos.length) })}</span>
+            {/if}
           </div>
         </section>
       {:else}
@@ -1452,7 +1465,7 @@
     gap: 9px;
     grid-column: 2;
     grid-row: 2;
-    grid-template-columns: minmax(0, 450px) auto;
+    grid-template-columns: minmax(0, 450px);
     justify-content: center;
     justify-self: center;
     min-width: 0;
@@ -1471,13 +1484,28 @@
   }
 
   .crop-legend {
-    align-self: center;
+    align-self: start;
     color: var(--muted);
     display: grid;
     font-size: 12px;
-    gap: 7px;
-    justify-self: start;
+    gap: 6px;
     min-width: 54px;
+  }
+
+  .minimap-legend {
+    left: 10px;
+    position: absolute;
+    top: 6px;
+    z-index: 6;
+  }
+
+  .minimap-legend::before {
+    background: linear-gradient(90deg, rgba(6, 18, 31, 0.74), rgba(6, 18, 31, 0.44) 52%, transparent);
+    content: '';
+    inset: -9px -56px -9px -10px;
+    pointer-events: none;
+    position: absolute;
+    z-index: -1;
   }
 
   .crop-legend span {

@@ -2,7 +2,7 @@
   import { base } from '$app/paths';
   import { datasetDraftToCapsInventory, readDatasetDraft } from '$lib/datasetDraft';
   import { detectBrowserLocale, tl, t, type Locale } from '$lib/i18n';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
 
   type Cap = {
     id: number;
@@ -134,6 +134,8 @@
   let rotation = 0;
   let hoveredCap: Cap | null = null;
   let hoverPosition = { x: 0, y: 0 };
+  let stepperRepeatDelay: ReturnType<typeof setTimeout> | null = null;
+  let stepperRepeatInterval: ReturnType<typeof setInterval> | null = null;
   const exportScale = 4;
   const layoutSettingsKey = 'caps-table-layout-settings';
   const imageLodLevels = [24, 36, 48, 64, 96, 128, 192, 256, 384, 512] as const;
@@ -547,6 +549,45 @@
       fitTableToView(true);
     }
     draw();
+  }
+
+  function adjustSizeField(field: 'width' | 'height' | 'diameter', delta: number) {
+    if (field === 'width') {
+      tableWidth = Math.max(1, Math.min(5000, Number(tableWidth) + delta));
+    } else if (field === 'height') {
+      tableHeight = Math.max(1, Math.min(5000, Number(tableHeight) + delta));
+    } else {
+      capsDiameter = Math.max(1, Math.min(5000, Number(capsDiameter) + delta));
+    }
+
+    updateTableSize();
+  }
+
+  function stopSizeStepperRepeat() {
+    if (stepperRepeatDelay) {
+      clearTimeout(stepperRepeatDelay);
+      stepperRepeatDelay = null;
+    }
+    if (stepperRepeatInterval) {
+      clearInterval(stepperRepeatInterval);
+      stepperRepeatInterval = null;
+    }
+  }
+
+  function startSizeStepperRepeat(event: PointerEvent, field: 'width' | 'height' | 'diameter', delta: number) {
+    event.preventDefault();
+    stopSizeStepperRepeat();
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+    adjustSizeField(field, delta);
+    stepperRepeatDelay = setTimeout(() => {
+      stepperRepeatInterval = setInterval(() => adjustSizeField(field, delta), 70);
+    }, 320);
+  }
+
+  function handleSizeStepperKeydown(event: KeyboardEvent, field: 'width' | 'height' | 'diameter', delta: number) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    adjustSizeField(field, delta);
   }
 
   function rotateCanvas() {
@@ -1348,6 +1389,8 @@
       window.removeEventListener('resize', resizeCanvas);
     };
   });
+
+  onDestroy(stopSizeStepperRepeat);
 </script>
 
 <svelte:head>
@@ -1398,17 +1441,89 @@
         <div class="size-row">
           <label for="tableWidth">
             <span>{tl(locale, 'width')}</span>
-            <input data-testid="table-width" type="number" id="tableWidth" bind:value={tableWidth} min="1" max="5000" step="1" oninput={updateTableSize} />
+            <span class="number-stepper">
+              <input data-testid="table-width" type="number" id="tableWidth" bind:value={tableWidth} min="1" max="5000" step="1" oninput={updateTableSize} />
+              <span class="stepper-buttons" aria-hidden="false">
+                <button
+                  type="button"
+                  aria-label="Увеличить ширину"
+                  onpointerdown={(event) => startSizeStepperRepeat(event, 'width', 1)}
+                  onpointerup={stopSizeStepperRepeat}
+                  onpointercancel={stopSizeStepperRepeat}
+                  onlostpointercapture={stopSizeStepperRepeat}
+                  onblur={stopSizeStepperRepeat}
+                  onkeydown={(event) => handleSizeStepperKeydown(event, 'width', 1)}
+                ><span class="step-up"></span></button>
+                <button
+                  type="button"
+                  aria-label="Уменьшить ширину"
+                  onpointerdown={(event) => startSizeStepperRepeat(event, 'width', -1)}
+                  onpointerup={stopSizeStepperRepeat}
+                  onpointercancel={stopSizeStepperRepeat}
+                  onlostpointercapture={stopSizeStepperRepeat}
+                  onblur={stopSizeStepperRepeat}
+                  onkeydown={(event) => handleSizeStepperKeydown(event, 'width', -1)}
+                ><span class="step-down"></span></button>
+              </span>
+            </span>
           </label>
 
           <label for="tableHeight">
             <span>{tl(locale, 'height')}</span>
-            <input data-testid="table-height" type="number" id="tableHeight" bind:value={tableHeight} min="1" max="5000" step="1" oninput={updateTableSize} />
+            <span class="number-stepper">
+              <input data-testid="table-height" type="number" id="tableHeight" bind:value={tableHeight} min="1" max="5000" step="1" oninput={updateTableSize} />
+              <span class="stepper-buttons" aria-hidden="false">
+                <button
+                  type="button"
+                  aria-label="Увеличить длину"
+                  onpointerdown={(event) => startSizeStepperRepeat(event, 'height', 1)}
+                  onpointerup={stopSizeStepperRepeat}
+                  onpointercancel={stopSizeStepperRepeat}
+                  onlostpointercapture={stopSizeStepperRepeat}
+                  onblur={stopSizeStepperRepeat}
+                  onkeydown={(event) => handleSizeStepperKeydown(event, 'height', 1)}
+                ><span class="step-up"></span></button>
+                <button
+                  type="button"
+                  aria-label="Уменьшить длину"
+                  onpointerdown={(event) => startSizeStepperRepeat(event, 'height', -1)}
+                  onpointerup={stopSizeStepperRepeat}
+                  onpointercancel={stopSizeStepperRepeat}
+                  onlostpointercapture={stopSizeStepperRepeat}
+                  onblur={stopSizeStepperRepeat}
+                  onkeydown={(event) => handleSizeStepperKeydown(event, 'height', -1)}
+                ><span class="step-down"></span></button>
+              </span>
+            </span>
           </label>
 
           <label for="capDiameter">
             <span>{tl(locale, 'diameter')}</span>
-            <input data-testid="cap-diameter" type="number" id="capDiameter" bind:value={capsDiameter} min="1" max="5000" step="1" oninput={updateTableSize} />
+            <span class="number-stepper">
+              <input data-testid="cap-diameter" type="number" id="capDiameter" bind:value={capsDiameter} min="1" max="5000" step="1" oninput={updateTableSize} />
+              <span class="stepper-buttons" aria-hidden="false">
+                <button
+                  type="button"
+                  aria-label="Увеличить диаметр"
+                  onpointerdown={(event) => startSizeStepperRepeat(event, 'diameter', 1)}
+                  onpointerup={stopSizeStepperRepeat}
+                  onpointercancel={stopSizeStepperRepeat}
+                  onlostpointercapture={stopSizeStepperRepeat}
+                  onblur={stopSizeStepperRepeat}
+                  onkeydown={(event) => handleSizeStepperKeydown(event, 'diameter', 1)}
+                ><span class="step-up"></span></button>
+                <button
+                  type="button"
+                  aria-label="Уменьшить диаметр"
+                  onpointerdown={(event) => startSizeStepperRepeat(event, 'diameter', -1)}
+                  onpointerup={stopSizeStepperRepeat}
+                  onpointercancel={stopSizeStepperRepeat}
+                  onlostpointercapture={stopSizeStepperRepeat}
+                  onblur={stopSizeStepperRepeat}
+                  onkeydown={(event) => handleSizeStepperKeydown(event, 'diameter', -1)}
+                ><span class="step-down"></span></button>
+              </span>
+            </span>
           </label>
         </div>
         <div class="button-row">
@@ -1738,6 +1853,17 @@
     width: 100%;
   }
 
+  input[type='number']::-webkit-inner-spin-button,
+  input[type='number']::-webkit-outer-spin-button {
+    appearance: none;
+    margin: 0;
+  }
+
+  input[type='number'] {
+    appearance: textfield;
+    -moz-appearance: textfield;
+  }
+
   input[type='number'],
   button {
     background: var(--control);
@@ -1748,6 +1874,74 @@
     padding: 6px 10px;
   }
 
+  .size-row .number-stepper {
+    align-items: stretch;
+    background: var(--control);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 20px;
+    min-height: 36px;
+    overflow: hidden;
+  }
+
+  .size-row .number-stepper input {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    min-height: 34px;
+    padding: 6px 4px 6px 10px;
+  }
+
+  .size-row .stepper-buttons {
+    background: transparent;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+    height: 100%;
+    justify-self: stretch;
+    min-height: 0;
+    width: 100%;
+  }
+
+  .size-row .stepper-buttons button {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    display: flex;
+    height: 100%;
+    justify-content: center;
+    min-height: 0;
+    min-width: 0;
+    padding: 0;
+    width: 100%;
+  }
+
+  .size-row .stepper-buttons button:first-child {
+    border-bottom: 0;
+  }
+
+  .size-row .stepper-buttons button:hover {
+    background: transparent;
+  }
+
+  .size-row .step-up,
+  .size-row .step-down {
+    border-left: 3.5px solid transparent;
+    border-right: 3.5px solid transparent;
+    display: block;
+    height: 0;
+    width: 0;
+  }
+
+  .size-row .step-up {
+    border-bottom: 4.5px solid var(--muted);
+  }
+
+  .size-row .step-down {
+    border-top: 4.5px solid var(--muted);
+  }
+
   button {
     cursor: pointer;
     font-weight: 600;
@@ -1756,6 +1950,23 @@
   button:hover {
     background: var(--control-hover);
     border-color: var(--accent);
+  }
+
+  .size-row .stepper-buttons button,
+  .size-row .stepper-buttons button:hover,
+  .size-row .stepper-buttons button:focus,
+  .size-row .stepper-buttons button:active {
+    appearance: none;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .size-row .stepper-buttons button {
+    border: 0;
+  }
+
+  .size-row .stepper-buttons button:first-child {
+    border-bottom: 0;
   }
 
   .wide-button {
